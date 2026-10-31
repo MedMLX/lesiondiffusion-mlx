@@ -1,0 +1,87 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lesiondiffusion-mlx"
+version = "0.2.5"
+description = "Native MLX implementation of LesionDiffusion"
+readme = "README.md"
+requires-python = ">=3.13,<3.15"
+classifiers = ["Operating System :: MacOS :: MacOS X"]
+license = "Apache-2.0 AND MIT AND BSD-3-Clause"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
+authors = [{ name = "Joseph Sandoval" }, { name = "Alfredo Sandoval Jr." }]
+dependencies = [
+  "medmlx-core==0.2.5",
+  "nibabel>=5.3,<6",
+  "numpy>=2.2,<3",
+  "safetensors>=0.6,<1",
+  "scipy>=1.15,<2",
+  "tokenizers>=0.21,<1",
+]
+
+[project.urls]
+Homepage = "https://medmlx.org"
+Repository = "https://github.com/MedMLX/lesiondiffusion-mlx"
+Weights = "https://huggingface.co/MedMLX/lesiondiffusion-mlx"
+
+[project.entry-points."medmlx.models"]
+lesiondiffusion = "lesiondiffusion_mlx.medmlx:MODEL"
+
+[project.optional-dependencies]
+dev = [
+  "pyright==1.1.414",
+  "pytest>=8.4,<10",
+  "ruff>=0.13,<1",
+  "scipy-stubs>=1.18.1.1,<1.19",
+  "torch>=2.13,<2.14",
+  "einops>=0.8.1,<0.9",
+  "pillow>=13,<14",
+  "hypothesis>=6.100,<7",
+]
+reference = ["einops==0.8.2", "omegaconf==2.3.1", "transformers==5.19.0"]
+
+[tool.lesiondiffusion]
+reference = "src/lesiondiffusion_mlx/reference.json"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lesiondiffusion_mlx"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-config --strict-markers"
+
+[tool.uv]
+constraint-dependencies = ["setuptools>=84.1.0", "filelock>=4.2.1", "certifi>=2026.10.19"]
+environments = ["sys_platform == 'darwin' and platform_machine == 'arm64'"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+extend-select = ["TID251", "TID252"]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pyright]
+include = ["scripts","src","tests","typings"]
+extraPaths = ["src", "scripts"]
+pythonVersion = "3.13"
+typeCheckingMode = "standard"
+enableTypeIgnoreComments = false
+reportUnnecessaryTypeIgnoreComment = "error"
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+
+[tool.hatch.build.targets.sdist]
+only-include = [
+  "src/lesiondiffusion_mlx",
+  "pyproject.toml",
+  "README.md",
+  "LICENSE",
+  "THIRD_PARTY_NOTICES.md",
+]
