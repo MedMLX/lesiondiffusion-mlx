@@ -2,7 +2,7 @@
 
 Add synthetic lesions to CT with native MLX, with controls for organ, size, placement and phenotype.
 
-[Model weights](https://huggingface.co/MedMLX/lesiondiffusion-mlx)
+[Docs](https://github.com/MedMLX/lesiondiffusion-mlx/blob/main/docs/technical.md) · [Model weights](https://huggingface.co/MedMLX/lesiondiffusion-mlx)
 
 | Input | Output |
 | :--- | :--- |

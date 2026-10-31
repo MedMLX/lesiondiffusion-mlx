@@ -40,7 +40,7 @@ uv pip install --python "$TMPDIR/venv-lesiondiffusion-mlx/bin/python" -e '.[dev,
 ```
 
 MLX, which runs the networks, is installed as a dependency of `medmlx-core`.
-Version 0.2.3 uses `medmlx-core==0.2.5` and downloads the native bundle from
+The current release uses `medmlx-core==0.2.5` and downloads the native bundle from
 `MedMLX/lesiondiffusion-mlx` when `weights_path` is omitted. An explicit folder
 never triggers a download. It contains
 `model.safetensors` and `tokenizer.json`. Safetensors keys are prefixed `lmnet.`,
@@ -111,7 +111,7 @@ slices, so odd voxel extents lose
 one voxel. Placement guides the reference box; generated masks are selected by
 upstream threshold/component/volume QC and may extend beyond the box or organ.
 
-Version 0.2.3 accepts an optional `lesion_mask_path` to replace LMNet's
+The runner accepts an optional `lesion_mask_path` to replace LMNet's
 mask with a supplied lesion shape:
 
 ```python
