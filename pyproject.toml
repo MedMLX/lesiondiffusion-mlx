@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lesiondiffusion-mlx"
-version = "0.2.6.post1"
+version = "0.2.6.post2"
 description = "Add synthetic lesions to CT with native MLX, with controls for organ, size, placement and phenotype"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
@@ -48,7 +48,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://medmlx.org"
-Documentation = "https://github.com/MedMLX/lesiondiffusion-mlx/blob/v0.2.6.post1/README.md"
+Documentation = "https://github.com/MedMLX/lesiondiffusion-mlx/blob/v0.2.6.post2/README.md"
 Repository = "https://github.com/MedMLX/lesiondiffusion-mlx"
 Issues = "https://github.com/MedMLX/lesiondiffusion-mlx/issues"
 Weights = "https://huggingface.co/MedMLX/lesiondiffusion-mlx"
