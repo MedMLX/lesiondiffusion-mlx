@@ -203,7 +203,7 @@ wheels = [
 
 [[package]]
 name = "lesiondiffusion-mlx"
-version = "0.2.6"
+version = "0.2.6.post1"
 source = { editable = "." }
 dependencies = [
     { name = "medmlx-core" },

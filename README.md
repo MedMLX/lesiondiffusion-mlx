@@ -6,14 +6,14 @@ Add synthetic lesions to CT with native MLX, with controls for organ, size, plac
 
 [![PyPI](https://img.shields.io/pypi/v/lesiondiffusion-mlx)](https://pypi.org/project/lesiondiffusion-mlx/)
 [![Python](https://img.shields.io/pypi/pyversions/lesiondiffusion-mlx)](https://pypi.org/project/lesiondiffusion-mlx/)
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue)](https://github.com/MedMLX/lesiondiffusion-mlx/blob/v0.2.6/LICENSE)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue)](https://github.com/MedMLX/lesiondiffusion-mlx/blob/v0.2.6.post1/LICENSE)
 [![Apple Silicon](https://img.shields.io/badge/Apple_Silicon-MLX-black?logo=apple)](https://github.com/ml-explore/mlx)
 [![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97_Hugging_Face-weights-yellow)](https://huggingface.co/MedMLX/lesiondiffusion-mlx)
 [![MedMLX](https://img.shields.io/badge/MedMLX-runtime-A51C30)](https://github.com/MedMLX/medmlx)
 
 [Model weights](https://huggingface.co/MedMLX/lesiondiffusion-mlx) · [MedMLX](https://github.com/MedMLX/medmlx)
 
-<img src="https://raw.githubusercontent.com/MedMLX/lesiondiffusion-mlx/v0.2.6/docs/showcase.png" alt="CT with a synthetic lesion placed inside an organ mask" width="100%">
+<img src="https://raw.githubusercontent.com/MedMLX/lesiondiffusion-mlx/v0.2.6.post1/docs/showcase.png" alt="CT with a synthetic lesion placed inside an organ mask" width="100%">
 
 </div>
 
@@ -23,8 +23,7 @@ Add synthetic lesions to CT with native MLX, with controls for organ, size, plac
 | **Output** | Synthetic CT and lesion mask |
 | **Hardware** | Apple Silicon with Metal; **18.74 GB** peak MLX memory for `lesiondiffusion` in source mode on a 160×160×128, 1 mm RAS crop. |
 
-The [v0.2.5 measurement](https://github.com/MedMLX/lesiondiffusion-mlx/blob/v0.2.6/docs/technical.md#upstream-decisions-and-qualification)
-used the AMOS case 0008 crop and 200 diffusion steps with
+The v0.2.5 memory measurement used the AMOS case 0008 crop and 200 diffusion steps with
 `inference_mode="source"`: FP32 LMNet and text encoder, FP16 LINet and VQ.
 It does not measure the default conditioned mode or larger volumes. Peak MLX
 memory excludes host preprocessing and other applications.
@@ -130,6 +129,6 @@ only within MLX. Inference needs Apple Silicon with Metal and has no CPU fallbac
 
 ## License
 
-[Apache-2.0](https://github.com/MedMLX/lesiondiffusion-mlx/blob/v0.2.6/LICENSE). See [third-party notices](https://github.com/MedMLX/lesiondiffusion-mlx/blob/v0.2.6/THIRD_PARTY_NOTICES.md). Model weights retain their publisher terms.
+[Apache-2.0](https://github.com/MedMLX/lesiondiffusion-mlx/blob/v0.2.6.post1/LICENSE). See [third-party notices](https://github.com/MedMLX/lesiondiffusion-mlx/blob/v0.2.6.post1/THIRD_PARTY_NOTICES.md). Model weights retain their publisher terms.
 
 For research and education. Outputs require human review.
