@@ -1,0 +1,1 @@
+"""LesionDiffusion extraction contracts."""
