@@ -13,13 +13,13 @@ from __future__ import annotations
 import gc
 import json
 import math
-import os
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from os import PathLike
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Final, Literal, NotRequired, TypedDict, cast
 
 import numpy as np
@@ -518,7 +518,7 @@ def _run_paths(
     if output.exists() and not output.is_dir():
         raise InvalidInputError(f"LesionDiffusion output path is not a directory: {output}")
     if not overwrite:
-        existing = [path for path in outputs.values() if path.exists()]
+        existing = [path for path in outputs.values() if path.exists() or path.is_symlink()]
         if existing:
             raise InvalidInputError(
                 f"{existing[0]} already exists; pass overwrite=true to replace outputs"
@@ -1923,8 +1923,8 @@ def materialize_arrays(
 ) -> tuple[OutputValidation, dict[str, object] | None]:
     """Validate the generated arrays and write every output NIfTI file.
 
-    All files, including ``organ_mask``, are first written to hidden temporary files
-    beside their destinations and moved into place only after every write succeeds.
+    All files, including ``organ_mask``, are first written in a private temporary
+    directory beside their destinations and moved into place after every write succeeds.
     A failure before the final moves leaves no new output that would block a retry
     without ``overwrite``; a failure or interruption during those moves can leave a subset.
 
@@ -2001,9 +2001,10 @@ def materialize_arrays(
         (lesion, "target_mask", np.uint8),
         (organ, "organ_mask", np.uint8),
     ]
-    token = f".lesiondiffusion-{os.getpid()}-{time.monotonic_ns()}-"
-    staged = {role: outputs[role].with_name(token + outputs[role].name) for _, role, _ in writes}
-    try:
+    directory = outputs["synthetic_image"].parent
+    directory.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(prefix=".lesiondiffusion-", dir=directory) as staging:
+        staged = {role: Path(staging) / outputs[role].name for _, role, _ in writes}
         for data, role, dtype in writes:
             _save_like_reference(
                 data=data,
@@ -2013,9 +2014,6 @@ def materialize_arrays(
             )
         for role, path in staged.items():
             path.replace(outputs[role])
-    finally:
-        for path in staged.values():
-            path.unlink(missing_ok=True)
     validation: OutputValidation = {
         "schema_version": 1,
         "lesion_voxel_count": int(lesion.sum()),
