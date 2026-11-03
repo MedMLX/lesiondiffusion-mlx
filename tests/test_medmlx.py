@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -198,8 +199,9 @@ def _arguments(
         ({"inference_mode": "unknown"}, None),
         ({"overwrite": "yes"}, None),
         ({}, "synthetic_ct.nii.gz"),
+        ({}, "dangling:synthetic_ct.nii.gz"),
     ],
-    ids=["path", "range", "choice", "boolean", "output-conflict"],
+    ids=["path", "range", "choice", "boolean", "output-conflict", "dangling-output"],
 )
 def test_invalid_arguments_fail_before_downloading_weights(
     overrides: dict[str, object],
@@ -218,12 +220,17 @@ def test_invalid_arguments_fail_before_downloading_weights(
     output = tmp_path / "out"
     if existing is not None:
         output.mkdir()
-        (output / existing).touch()
+        if existing.startswith("dangling:"):
+            (output / existing.removeprefix("dangling:")).symlink_to(tmp_path / "absent.nii.gz")
+        else:
+            (output / existing).touch()
     paths = {key: tmp_path / str(path) for key, path in overrides.items() if key.endswith("_path")}
     arguments = _arguments(scan, output, tmp_path, **{**overrides, **paths})
     arguments.pop("weights_path")
     with pytest.raises(InvalidInputError):
         run(**arguments)
+    if existing is not None and existing.startswith("dangling:"):
+        assert (output / existing.removeprefix("dangling:")).is_symlink()
 
 
 def test_missing_or_mismatched_weights_raise_asset_not_ready(
@@ -327,10 +334,19 @@ def test_run_matches_upstream_end_to_end(
     tmp_path: Path,
     mx: Mlx,
     upstream_inpainting: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Compare the native runner with the recorded upstream pipeline."""
     fixture = reference("generation")
-    result = run(**_arguments(scan, tmp_path / "out", tiny_weights))
+    output = tmp_path / "out"
+    output.mkdir()
+    victim = tmp_path / "victim.nii.gz"
+    victim.write_bytes(b"original")
+    monkeypatch.setattr(medmlx.time, "monotonic_ns", lambda: 0)
+    (output / f".lesiondiffusion-{os.getpid()}-0-target_mask.nii.gz").symlink_to(victim)
+
+    result = run(**_arguments(scan, output, tiny_weights))
+    assert victim.read_bytes() == b"original"
     images = {role: nib.load(path) for role, path in result["outputs"].items()}
     assert set(images) == {"synthetic_image", "target_mask", "organ_mask"}
     source = nib.load(scan[0])
