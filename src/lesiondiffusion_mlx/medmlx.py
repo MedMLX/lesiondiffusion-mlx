@@ -11,7 +11,6 @@ human review.
 from __future__ import annotations
 
 import gc
-import json
 import math
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -35,6 +34,7 @@ from medmlx_core.weights import weights_dir, weights_revision
 from lesiondiffusion_mlx._arrays import BoolArray, FloatArray, HostArray, NumericArray
 from lesiondiffusion_mlx._nifti import ImageFileError, NiftiImage, nib
 from lesiondiffusion_mlx._reference import REFERENCE as _REFERENCE
+from lesiondiffusion_mlx._schedules import is_integer
 from lesiondiffusion_mlx._typing import ArrayConstructor
 
 if TYPE_CHECKING:
@@ -68,12 +68,9 @@ DEFAULT_OUTPUT_REGION: Final = "full"
 # blended into the input CT over this margin; farther voxels retain its float32 cast.
 LOCALIZATION_MARGIN_MM: Final = 6.0
 SOURCE_REF: Final[str] = _REFERENCE["revision"]
-CONVERSION_SCHEMA: Final = "medmlx.lesiondiffusion.weights.v1"
-CONVERSION_VERSION: Final = 1
 WEIGHT_STAGES: Final = ("lmnet", "linet", "vq", "lmnet_text", "linet_text")
 SOURCE_INFERENCE_STAGES: Final = tuple(name for name in WEIGHT_STAGES if name != "linet_text")
 TOKENIZER_FILE: Final = "tokenizer.json"
-CONVERSION_FILE: Final = "conversion.json"
 WARNING: Final = (
     "Synthetic lesion output requires human review and is not patient data or ground truth."
 )
@@ -283,17 +280,17 @@ class LesionDiffusionOptions:
         if self.bbox_center_voxel is not None:
             if len(self.bbox_center_voxel) != 3:
                 raise InvalidInputError("LesionDiffusion bbox_center_voxel must contain I, J, K")
-            if any(not _is_integer(value) for value in self.bbox_center_voxel):
+            if any(not is_integer(value) for value in self.bbox_center_voxel):
                 raise InvalidInputError("LesionDiffusion bbox_center_voxel values must be integers")
             if any(value < 0 for value in self.bbox_center_voxel):
                 raise InvalidInputError("LesionDiffusion bbox_center_voxel must not be negative")
-        if not _is_integer(self.diffusion_steps):
+        if not is_integer(self.diffusion_steps):
             raise InvalidInputError("LesionDiffusion diffusion_steps must be an integer")
         try:
             lesion_diffusion_timesteps(self.diffusion_steps)
         except ValueError as exc:
             raise InvalidInputError(str(exc)) from exc
-        if not _is_integer(self.seed):
+        if not is_integer(self.seed):
             raise InvalidInputError("LesionDiffusion seed must be an integer")
         if self.seed < 0:
             raise InvalidInputError("LesionDiffusion seed must not be negative")
@@ -1114,44 +1111,6 @@ def require_weights(path: _PathArg, *, inference_mode: str = DEFAULT_INFERENCE_M
     return directory
 
 
-def load_conversion(directory: Path) -> dict[str, object]:
-    """Read and check ``conversion.json``; return its provenance fields.
-
-    Raises:
-        ValueError: If the file is not a JSON object, or its schema, source revision,
-            EMA flag, layout or precision profile is not the current one.
-        OSError: If the file cannot be read.
-    """
-    metadata = _load_json_object(directory / CONVERSION_FILE)
-    if (
-        metadata.get("schema_version") != CONVERSION_SCHEMA
-        or metadata.get("source_ref") != SOURCE_REF
-    ):
-        raise ValueError("LesionDiffusion MLX conversion schema/source is not current")
-    if metadata.get("converter_version") != CONVERSION_VERSION or metadata.get("ema") is not True:
-        raise ValueError("LesionDiffusion MLX conversion must use current EMA conversion")
-    if metadata.get("layout") != "source_torch_ncdhw" or metadata.get("stored_dtype") != "float32":
-        raise ValueError("LesionDiffusion MLX conversion layout/dtype is not current")
-    if metadata.get("inference_dtype") != {
-        "lmnet": "float32",
-        "linet": "float16",
-        "vq": "float16",
-    }:
-        raise ValueError("LesionDiffusion MLX conversion precision profile is not current")
-    return {
-        key: metadata[key]
-        for key in (
-            "schema_version",
-            "converter_version",
-            "source_ref",
-            "layout",
-            "stored_dtype",
-            "inference_dtype",
-            "ema",
-        )
-    }
-
-
 def load_stage(directory: Path, name: str, mx: Mlx, *, dtype: Dtype) -> dict[str, Array]:
     """Load one stage from the native safetensors bundle and cast its arrays.
 
@@ -1164,17 +1123,6 @@ def load_stage(directory: Path, name: str, mx: Mlx, *, dtype: Dtype) -> dict[str
         for key, value in loaded.items()
         if key.startswith(prefix)
     }
-
-
-def _load_json_object(path: Path) -> dict[str, object]:
-    """Read a JSON object or report an invalid metadata file."""
-    try:
-        payload: object = json.loads(path.read_text(encoding="utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError(f"Could not read JSON object: {path}") from exc
-    if not isinstance(payload, dict):
-        raise ValueError(f"Expected JSON object: {path}")
-    return cast(dict[str, object], payload)
 
 
 # --- options --------------------------------------------------------------------------
@@ -1284,11 +1232,6 @@ def _check_box_source(
             raise InvalidInputError(
                 f"LesionDiffusion derives the box from lesion_mask_path; omit {name}"
             )
-
-
-def _is_integer(value: object) -> bool:
-    """Recognize integer inputs while excluding booleans."""
-    return isinstance(value, int) and not isinstance(value, bool)
 
 
 # --- geometry -------------------------------------------------------------------------
@@ -2158,7 +2101,6 @@ def _json_safe(value: object) -> object:
 __all__ = [
     "MODEL",
     "LesionDiffusionOptions",
-    "load_conversion",
     "load_stage",
     "require_weights",
     "run",

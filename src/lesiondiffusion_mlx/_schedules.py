@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-def _is_runtime_integer(value: object) -> bool:
+def is_integer(value: object) -> bool:
     """Recognize integer inputs while excluding booleans."""
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -26,9 +26,9 @@ def lesion_diffusion_timesteps(steps: int, total: int = 1000) -> tuple[int, ...]
             ``total < steps``, or the last index would reach ``total`` (for example
             ``steps=3`` or ``steps=1000`` with ``total=1000``).
     """
-    if not _is_runtime_integer(steps) or steps < 1:
+    if not is_integer(steps) or steps < 1:
         raise ValueError("LesionDiffusion DDIM steps must be a positive integer")
-    if not _is_runtime_integer(total) or total < steps:
+    if not is_integer(total) or total < steps:
         raise ValueError("LesionDiffusion DDIM schedule must contain at least as many timesteps")
     timesteps = tuple(value + 1 for value in range(0, total, total // steps))
     if timesteps[-1] >= total:
