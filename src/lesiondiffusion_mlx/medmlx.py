@@ -434,7 +434,7 @@ def run(
             would overwrite an input or an existing file.
         AssetNotReadyError: If the weights directory is missing or not current.
         ModelExecutionError: If a stage produces non-finite values, LMNet yields an
-            empty lesion mask, or another error occurs during execution.
+            empty lesion mask, or MLX raises a runtime error during execution.
     """
 
     options = _parse_options(
@@ -485,7 +485,8 @@ def run(
         spec, stages = _execute_run(geometry, options, directory, outputs)
     except MedmlxError:
         raise
-    except Exception as exc:
+    except RuntimeError as exc:
+        # MLX and Metal failures surface as RuntimeError; report them as execution errors.
         raise ModelExecutionError(f"LesionDiffusion failed during execution: {exc}") from exc
     return _run_result(options, geometry, outputs, directory, spec, stages, started_at, started)
 
@@ -1557,18 +1558,6 @@ def _pad_to_even(
     header.set_data_dtype(padded.dtype.type)
     padded_image = nib.Nifti1Image(cast(HostArray, padded), image.affine, header)
     return padded_image, padded
-
-
-def load_reference_nifti(
-    path: Path, *, resampling: Literal["source", "affine"] = "source"
-) -> tuple[NiftiImage, NumericArray]:
-    """Load CT on an even-padded RAS 1 mm grid; default to pinned source resampling.
-
-    ``resampling="affine"`` selects the world-coordinate sampling used by the
-    conditioned runner. See ``_standardize_to_ras_1mm`` for the edge convention.
-    """
-    image, data = _load_standardized_ct(path, resampling=resampling)
-    return _pad_to_even(image, data, mode="edge")
 
 
 def _load_standardized_ct(
