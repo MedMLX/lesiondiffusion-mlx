@@ -105,6 +105,8 @@ reportUnnecessaryTypeIgnoreComment = "error"
 ban-relative-imports = "all"
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
+"typing.Any" = {msg = "Use a precise type and parse untyped values at the boundary."}
+"typing_extensions.Any" = {msg = "Use a precise type and parse untyped values at the boundary."}
 
 [tool.hatch.build.targets.sdist]
 only-include = [

@@ -12,7 +12,7 @@ a small multiple of ``2**-22`` times the same sum.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 import pytest
@@ -181,9 +181,7 @@ def _conv_float64(
     def convolve(values: NumericArray, kernel: NumericArray) -> NumericArray:
         """Compute a float64 reference convolution for one kernel case."""
         padded = np.pad(values, [(0, 0), (0, 0), (1, 1), (1, 1), (1, 1)])
-        windows = cast(Any, np.lib.stride_tricks).sliding_window_view(
-            padded, (3, 3, 3), axis=(2, 3, 4)
-        )
+        windows = np.lib.stride_tricks.sliding_window_view(padded, (3, 3, 3), axis=(2, 3, 4))
         windows = windows[:, :, ::stride, ::stride, ::stride]
         return np.einsum("bcdhwijk,ocijk->bodhw", windows, kernel)
 
