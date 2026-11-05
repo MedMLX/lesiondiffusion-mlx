@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from lesiondiffusion_mlx._arrays import HostArray as HostArray
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from typing import Literal, overload
 
     import mlx.core as mx
+    from medmlx_core.typing import FastRuntime as CoreFastRuntime
+    from medmlx_core.typing import MlxRuntime as CoreMlxRuntime
     from tokenizers import Encoding
 
     type Array = mx.array
@@ -41,7 +44,77 @@ if TYPE_CHECKING:
             """Launch a Metal kernel and return its output arrays."""
             ...
 
-    Mlx = Any
+    class Fast(CoreFastRuntime, Protocol):
+        """The part of ``mx.fast`` used here, with typed Metal-kernel construction."""
+
+        scaled_dot_product_attention = staticmethod(mx.fast.scaled_dot_product_attention)
+
+        def metal_kernel(
+            self,
+            name: str,
+            input_names: Sequence[str],
+            output_names: Sequence[str],
+            source: str,
+            header: str = "",
+            ensure_row_contiguous: bool = True,
+            atomic_outputs: bool = False,
+            compile_options: object | None = None,
+        ) -> MetalKernel:
+            """Compile a named Metal kernel with the supplied source."""
+            ...
+
+    class Random(Protocol):
+        normal = staticmethod(mx.random.normal)
+        seed = staticmethod(mx.random.seed)
+
+    class Mlx(CoreMlxRuntime, Protocol):
+        """Native ``mlx.core`` operations injected into the model and pipeline."""
+
+        @property
+        def fast(self) -> Fast:
+            """Return native fast operations and Metal-kernel construction."""
+            ...
+
+        @property
+        def random(self) -> Random:
+            """Return native random generation operations."""
+            ...
+
+        @overload
+        def load(
+            self,
+            file: str,
+            /,
+            format: Literal["safetensors"],
+            return_metadata: Literal[False] = False,
+        ) -> dict[str, Array]:
+            """Load a safetensors file as a name-to-array mapping."""
+            ...
+
+        @overload
+        def load(
+            self, file: str, /, format: str | None = None, return_metadata: bool = False
+        ) -> Array | dict[str, Array] | tuple[dict[str, Array], dict[str, object]]:
+            """Load arrays, and optionally metadata, from a supported file format."""
+            ...
+
+        addmm = staticmethod(mx.addmm)
+        all = staticmethod(mx.all)
+        argmin = staticmethod(mx.argmin)
+        clear_cache = staticmethod(mx.clear_cache)
+        compile = staticmethod(mx.compile)
+        contiguous = staticmethod(mx.contiguous)
+        cos = staticmethod(mx.cos)
+        device_info = staticmethod(mx.device_info)
+        erf = staticmethod(mx.erf)
+        exp = staticmethod(mx.exp)
+        full = staticmethod(mx.full)
+        isfinite = staticmethod(mx.isfinite)
+        reciprocal = staticmethod(mx.reciprocal)
+        sin = staticmethod(mx.sin)
+        softmax = staticmethod(mx.softmax)
+        sqrt = staticmethod(mx.sqrt)
+        sum = staticmethod(mx.sum)
 
 
 # Defined at runtime because callers pass it to ``typing.cast`` unquoted.
