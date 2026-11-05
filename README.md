@@ -21,12 +21,11 @@ Add synthetic lesions to CT with native MLX, with controls for organ, size, plac
 | :--- | :--- |
 | **Input** | CT + aligned binary organ mask |
 | **Output** | Synthetic CT and lesion mask |
-| **Hardware** | Apple Silicon with Metal; **18.74 GB** peak MLX memory for `lesiondiffusion` in source mode on a 160×160×128, 1 mm RAS crop. |
+| **Hardware** | Apple Silicon with Metal; **3.46 GB** peak MLX memory for `lesiondiffusion` in source mode and **3.29 GB** in the default conditioned mode on a 160×160×128, 1 mm RAS crop. |
 
-The v0.2.5 memory measurement used the AMOS case 0008 crop and 200 diffusion steps with
-`inference_mode="source"`: FP32 LMNet and text encoder, FP16 LINet and VQ.
-It does not measure the default conditioned mode or larger volumes. Peak MLX
-memory excludes host preprocessing and other applications.
+Both measurements used an AMOS case 0008 crop and 200 diffusion steps: FP32 LMNet and
+text encoders, FP16 LINet and VQ. They do not measure larger volumes. Peak MLX memory
+excludes host preprocessing and other applications.
 
 ## Use with MedMLX
 

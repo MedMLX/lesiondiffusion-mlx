@@ -108,8 +108,9 @@ MODEL: Final[dict[str, str | float]] = {
         "Insert one phenotype-controlled synthetic lesion into a CT, given a binary organ "
         "mask, or inpaint a supplied binary lesion mask. Outputs use a RAS 1 mm grid."
     ),
-    # README: source mode, 200 steps, 160x160x128 RAS 1 mm AMOS case 0008 crop.
-    "peak_memory_gb": 18.74,
+    # README: source mode (the larger of the two modes), 200 steps, 160x160x128
+    # RAS 1 mm AMOS case 0008 crop.
+    "peak_memory_gb": 3.46,
 }
 
 
@@ -841,6 +842,8 @@ def _run_lmnet(
     )
     text = BiomedTextEncoder(load_stage(directory, "lmnet_text", mx, dtype=mx.float32), mx)
     condition = encode_attributes(lm_attributes, text, tokenizer_path, mx)
+    # The evaluated condition no longer needs the 0.44 GB FP32 text encoder.
+    del text
     denoiser = mx.compile(lmnet.__call__) if optimized else lmnet.__call__
     # Conditioning channels: anatomy label id / 104 (the upstream label count),
     # target organ, box; shape (1, 3, *LMNET_CROP).
@@ -865,7 +868,7 @@ def _run_lmnet(
         if int(np.sum(component)) > (50 if "stone" in options.lesion_type else 400):
             break
     # Release LMNet before LINet and the VQ autoencoder load, to bound peak memory.
-    del lmnet, denoiser, text, condition, conditioning, sampler, samples
+    del lmnet, denoiser, condition, conditioning, sampler, samples
     gc.collect()
     mx.clear_cache()
     if not np.any(lesion):

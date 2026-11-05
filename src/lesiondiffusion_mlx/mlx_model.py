@@ -11,6 +11,7 @@ import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
@@ -69,6 +70,11 @@ LMNET_CONFIG = UnetConfig(16, 1, (4,))
 # skip_context=True follows the pinned inference YAML; the runner overrides it per
 # inference mode (context is enabled only in "conditioned" mode).
 LINET_CONFIG = UnetConfig(128, 2, (4, 8), skip_context=True)
+
+# Largest explicit-attention similarity tensor built at once. Source-mode LMNet's
+# 23,104-token FP32 self-attention would otherwise hold several 4.3 GB tensors,
+# which set the source-mode peak; LINet's 512 MiB FP16 similarity stays whole.
+_SIMILARITY_CHUNK_BYTES = 1 << 30
 
 # Convolutions applied only to a nearest 2x upsampling: the UNet decoder's
 # ``Upsample.conv`` and the VQ decoder's ``upsample.conv``.
@@ -457,10 +463,36 @@ class LdmUnet(SourceLayers):
         else:
             # Source half attention rounds similarity and probability tensors;
             # LINet retains those boundaries rather than using fused SDPA.
-            similarity = (split(q) @ mx.swapaxes(split(k), -1, -2)) * depth**-0.5
-            result = self.softmax(similarity) @ split(v)
+            result = self._explicit_attention(split(q), split(k), split(v), depth**-0.5)
         result = mx.reshape(mx.transpose(result, (0, 2, 1, 3)), x.shape)
         return self.dense(result, key + ".to_out.0")
+
+    def _explicit_attention(self, q: Array, k: Array, v: Array, scale: float) -> Array:
+        """Return ``softmax(q @ k^T * scale) @ v`` for ``(B, heads, tokens, depth)`` inputs.
+
+        A similarity tensor above ``_SIMILARITY_CHUNK_BYTES`` is built in balanced
+        query-row chunks, each evaluated before the next, so this path must not be
+        traced by ``mx.compile`` at that size (the runner compiles only fused-attention
+        denoisers). Rows are independent in both products and the row softmax. For a
+        batched product (batch x heads > 1), MLX 0.32's GEMM never chooses split-K, and
+        chunks of two or more rows avoid its GEMV path, so each element keeps its
+        reduction order: the chunked output is bitwise identical to the whole product.
+        """
+        mx = self.mx
+        k = mx.swapaxes(k, -1, -2)
+        batch, heads, queries = int(q.shape[0]), int(q.shape[1]), int(q.shape[2])
+        row_bytes = batch * heads * int(k.shape[-1]) * q.dtype.size
+        chunks = min(-(-queries * row_bytes // _SIMILARITY_CHUNK_BYTES), queries // 2)
+        if chunks <= 1 or batch * heads == 1:
+            return self.softmax((q @ k) * scale) @ v
+        # Balanced bounds give every chunk at least two rows.
+        bounds = [index * queries // chunks for index in range(chunks + 1)]
+        pieces: list[Array] = []
+        for start, stop in pairwise(bounds):
+            piece = self.softmax((q[:, :, start:stop] @ k) * scale) @ v
+            mx.eval(piece)
+            pieces.append(piece)
+        return mx.concatenate(pieces, axis=2)
 
     def transformer(self, x: Array, context: Array | None, key: str) -> Array:
         """Apply self-attention, optional context attention and a feed-forward block.
@@ -552,7 +584,50 @@ class VqAutoencoder(SourceLayers):
     Tensors are channels first. ``encode`` maps ``(B, C, D, H, W)`` to a latent of
     half the spatial size (rounded down); ``decode`` snaps latent vectors to their
     nearest codebook entry and returns twice the latent's spatial size.
+
+    Convolution, normalization and SiLU outputs are evaluated as they are built, so
+    the autoencoder must not be traced by ``mx.compile``. Full-resolution activations
+    are 96-channel volumes (629 MB in FP16 on a 160x160x128 grid). MLX keeps each op's
+    inputs alive until its command buffer completes and lets about ten buffers run
+    ahead, so an unsynchronized chain of such ops holds several times its live set:
+    this halves the encoder and decoder peaks. Evaluation order does not change the
+    arithmetic.
     """
+
+    def conv(self, x: Array, key: str, *, padding: int = 1, stride: int = 1) -> Array:
+        """Apply ``SourceLayers.conv`` and evaluate the result."""
+        return self._evaluated(super().conv(x, key, padding=padding, stride=stride))
+
+    def norm(self, x: Array, key: str, *, groups: int, eps: float) -> Array:
+        """Apply ``SourceLayers.norm`` and evaluate the result."""
+        return self._evaluated(super().norm(x, key, groups=groups, eps=eps))
+
+    def silu(self, x: Array) -> Array:
+        """Apply ``SourceLayers.silu`` and evaluate the result."""
+        return self._evaluated(super().silu(x))
+
+    def norm_silu_conv(
+        self,
+        x: Array,
+        norm_key: str,
+        conv_key: str,
+        *,
+        groups: int,
+        eps: float,
+        shift: Array | None = None,
+        residual: Array | None = None,
+    ) -> Array:
+        """Apply ``SourceLayers.norm_silu_conv`` and evaluate the result."""
+        return self._evaluated(
+            super().norm_silu_conv(
+                x, norm_key, conv_key, groups=groups, eps=eps, shift=shift, residual=residual
+            )
+        )
+
+    def _evaluated(self, x: Array) -> Array:
+        """Evaluate ``x`` so the queued GPU work releases its inputs."""
+        self.mx.eval(x)
+        return x
 
     def residual(self, x: Array, key: str) -> Array:
         """Apply one VQ autoencoder residual block."""

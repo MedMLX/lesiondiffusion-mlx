@@ -88,6 +88,38 @@ def test_unet_reference(name: str, mx: Mlx) -> None:
     assert_numerical(result, fixture["output"])
 
 
+@pytest.mark.parametrize("name", ["unet_mask", "unet_inpainting"])
+def test_chunked_source_attention_is_bitwise_whole(
+    name: str, mx: Mlx, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Query-row chunking of explicit attention must not change any output bit.
+
+    The guarantee rests on MLX's GEMM dispatch (no split-K or GEMV for the chunked
+    products), so an MLX upgrade can break it. The fixtures cover FP32 (LMNet) and
+    FP16 (LINet) arithmetic; a 4 KiB budget splits their 64-token layers into chunks.
+    """
+    from lesiondiffusion_mlx import mlx_model
+
+    fixture = reference(name)
+    config_data = json.loads(fixture["config"].item())
+    for key in ("attention_resolutions", "channel_mult"):
+        config_data[key] = tuple(config_data[key])
+    config = UnetConfig(**config_data)
+    weights = unet_weights(
+        int(fixture["weight_seed"]),
+        cast("ArrayFactory[Array, Dtype]", mx),
+        getattr(mx, fixture["dtype"].item()),
+        skip_context=config.skip_context,
+    )
+    model = LdmUnet(weights, mx, config)
+    inputs = [
+        cast(ArrayConstructor, mx.array)(fixture[key]) for key in ("x", "timesteps", "context")
+    ]
+    whole = cast(HostArray, np.array(model(*inputs)))
+    monkeypatch.setattr(mlx_model, "_SIMILARITY_CHUNK_BYTES", 4096)
+    assert_bits(model(*inputs), whole)
+
+
 @pytest.mark.parametrize("name", ["silu", "softmax"])
 def test_unet_half_activations_reference(name: str, mx: Mlx) -> None:
     """Compare half-precision UNet activations with the source recording."""
