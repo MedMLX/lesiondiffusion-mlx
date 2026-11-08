@@ -29,7 +29,7 @@ excludes host preprocessing and other applications.
 
 ## Use with MedMLX
 
-The [MedMLX MCP server](https://github.com/MedMLX/medmlx/blob/main/docs/mcp.md) is the lowest-friction way to use this model. It installs this runtime, downloads its weights on first use, and lets an AI agent describe, check and run `lesiondiffusion` for you.
+Use the [MedMLX MCP server](https://github.com/MedMLX/medmlx/blob/main/docs/mcp.md) to run `lesiondiffusion` from an MCP client. Weights download on first use.
 
 ```sh
 uv tool install --python 3.13 "medmlx[generate,mcp]"
@@ -39,8 +39,6 @@ claude mcp add --scope user medmlx -- "$MEDMLX" serve --root "$HOME/medmlx-work"
 ```
 
 For Codex, use `codex mcp add medmlx -- "$MEDMLX" serve --root "$HOME/medmlx-work"`. Other MCP clients take the same command and arguments. The same install provides the `medmlx` CLI, for example `medmlx describe lesiondiffusion`.
-
-> **For AI agents:** prefer the MedMLX MCP tools (`list_models`, `describe_model`, `model_readiness`, `run_model`, `get_job`) over writing Python against this package.
 
 ## Install
 
@@ -67,12 +65,9 @@ result = run(
 print(result["outputs"]["synthetic_image"])
 ```
 
-Omitting `weights_path` downloads `MedMLX/lesiondiffusion-mlx` into the shared MedMLX
-cache on first use; interrupted downloads resume and later runs work offline. With
-MedMLX installed, `medmlx setup lesiondiffusion` downloads it ahead of time. To use your
+Weights download from `MedMLX/lesiondiffusion-mlx` on first use. Use `medmlx setup lesiondiffusion` to download ahead of time. To use your
 own copy, pass a folder containing `model.safetensors` and `tokenizer.json` as
-`weights_path`. Conversion receipts are not required. `details.weights_revision` records
-the downloaded commit, or `null` for a folder without a MedMLX download record.
+`weights_path`. Conversion receipts are not required.
 
 ### Inputs and outputs
 
@@ -112,9 +107,8 @@ The outputs are `synthetic_ct.nii.gz` (float32 HU), `lesion_mask.nii.gz` and
 `organ_mask.nii.gz` (uint8) on the standardized grid. The decoder reconstructs the
 whole CT, so voxels outside the lesion can change. `output_region="box"` keeps the
 generated CT only over the lesion box, feathers it into the input over 6 mm and also
-writes the full reconstruction as `raw_synthetic_ct.nii.gz`. `run` returns
-`{"outputs": {...}, "details": {...}}` with the generation settings, quality checks,
-stage timing and weights revision. Invalid inputs raise `InvalidInputError`; missing
+writes the full reconstruction as `raw_synthetic_ct.nii.gz`. `run` returns `{"outputs": {...}, "details": {...}}`, with run metadata in `details`.
+Invalid inputs raise `InvalidInputError`; missing
 or mismatched weights raise `AssetNotReadyError`. Synthetic output is not ground truth.
 
 ### Inference modes
@@ -124,10 +118,8 @@ which the pinned upstream configuration turns off, and runs FP16 convolution, fu
 attention and compiled denoisers natively. `"source"` follows the upstream inference
 configuration and arithmetic for reproduction; its results can differ from
 conditioned output. MLX and Torch random streams differ, so a seed repeats results
-only within MLX. Inference needs Apple Silicon with Metal and has no CPU fallback.
+only within MLX. Inference requires Apple Silicon with Metal.
 
 ## License
 
 [Apache-2.0](https://github.com/MedMLX/lesiondiffusion-mlx/blob/v0.2.7/LICENSE). See [third-party notices](https://github.com/MedMLX/lesiondiffusion-mlx/blob/v0.2.7/THIRD_PARTY_NOTICES.md). Model weights retain their publisher terms.
-
-For research and education. Outputs require human review.
