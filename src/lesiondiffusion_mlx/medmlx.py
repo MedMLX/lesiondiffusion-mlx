@@ -67,6 +67,14 @@ DEFAULT_OUTPUT_REGION: Final = "full"
 # Cosine feather width (mm) for ``output_region="box"``: the generated box is kept,
 # blended into the input CT over this margin; farther voxels retain its float32 cast.
 LOCALIZATION_MARGIN_MM: Final = 6.0
+# Per-axis receptive field of the VQ decoder around inpainted latent cells, in voxels
+# of the 1 mm standardized grid. An inpainted cell covers its lesion voxel and the next
+# one (+1). Thirteen 3x3x3 convolutions on the half-resolution latent reach 13 cells
+# (+26 voxels), and six 3x3x3 convolutions after upsampling reach 6 more voxels.
+# GroupNorm statistics span the whole volume, so a lesion also shifts farther voxels,
+# by under 0.05 HU on average in a generated abdomen. ``output_region="lesion"``
+# applies the change within this reach and keeps the input beyond it.
+DECODER_REACH_VOXELS: Final = 33
 SOURCE_REF: Final[str] = _REFERENCE["revision"]
 WEIGHT_STAGES: Final = ("lmnet", "linet", "vq", "lmnet_text", "linet_text")
 SOURCE_INFERENCE_STAGES: Final = tuple(name for name in WEIGHT_STAGES if name != "linet_text")
@@ -158,7 +166,8 @@ class GenerationSpec(TypedDict):
     ``anatomy_mask`` is present only when an anatomy map was supplied,
     ``lesion_mask`` only when a lesion mask was supplied (its file, voxel counts and
     the box derived from it; see ``prepare_lesion_mask``), and ``compositing`` only
-    for ``output_region="box"`` (see ``localize_output``).
+    for ``output_region="box"`` or ``"lesion"`` (see ``localize_output`` and
+    ``apply_lesion_change``).
     """
 
     schema_version: str
@@ -203,7 +212,8 @@ class RunResult(TypedDict):
     """Return value of ``run``.
 
     ``outputs`` maps a role to a POSIX file path: ``synthetic_image``, ``target_mask``
-    and ``organ_mask``, plus ``raw_synthetic_image`` when ``output_region="box"``.
+    and ``organ_mask``, plus ``raw_synthetic_image`` when ``output_region`` is
+    ``"box"`` or ``"lesion"``.
     """
 
     outputs: dict[str, str]
@@ -225,7 +235,7 @@ class LesionDiffusionOptions:
     the cavity phrase in the text. ``shape`` through ``specific_features`` are free
     text for the upstream report. ``seed`` (0 to 2**32 - 1) seeds MT19937 box placement
     and MLX sampling. ``inference_mode`` is ``"conditioned"`` or ``"source"`` and
-    ``output_region`` is ``"full"`` or ``"box"``; see ``run``.
+    ``output_region`` is ``"full"``, ``"box"`` or ``"lesion"``; see ``run``.
 
     Raises:
         InvalidInputError: From construction, for any value outside these contracts.
@@ -252,8 +262,8 @@ class LesionDiffusionOptions:
         """Validate inference, geometry, and lesion-generation options."""
         if self.inference_mode not in {"conditioned", "source"}:
             raise InvalidInputError("LesionDiffusion inference_mode must be conditioned or source")
-        if self.output_region not in {"full", "box"}:
-            raise InvalidInputError("LesionDiffusion output_region must be full or box")
+        if self.output_region not in {"full", "box", "lesion"}:
+            raise InvalidInputError("LesionDiffusion output_region must be full, box or lesion")
         if self.organ not in SOURCE_ORGAN_LABELS:
             raise InvalidInputError(f"Unknown upstream organ: {self.organ}")
         if not self.lesion_type.strip():
@@ -411,14 +421,18 @@ def run(
             coordinates and FP16 VQ decoding, which overflows to non-finite values on
             some inputs and then raises ``ModelExecutionError``.
         output_region: ``"full"`` writes upstream's full-volume reconstruction, whose HU
-            are clipped to [-1000, 1000] and can differ from the input outside the
-            lesion. ``"box"`` keeps the generated CT over the box, widened to the
-            lesion's bounding box when the lesion extends past it, feathers that region
-            into the input CT over ``LOCALIZATION_MARGIN_MM``, and writes the full
-            reconstruction as ``raw_synthetic_image``. Outside the blend region it
+            are clipped to [-1000, 1000] and differ from the input everywhere: the VQ
+            autoencoder does not reproduce its input exactly, and its offset depends on
+            the encoded volume. ``"box"`` keeps the generated CT over the box, widened
+            to the lesion's bounding box when the lesion extends past it, feathers that
+            region into the input CT over ``LOCALIZATION_MARGIN_MM``, and writes the
+            full reconstruction as ``raw_synthetic_image``. Outside the blend region it
             retains the standardized input cast to float32, which can round
             higher-precision input. The lesion mask is not clipped; every lesion voxel
-            lies in the kept region.
+            lies in the kept region. ``"lesion"`` decodes the unmodified input latent
+            as well and adds only the lesion's change to the input CT (see
+            ``apply_lesion_change``), so the autoencoder's offset does not reach the
+            output. It also writes ``raw_synthetic_image``.
         overwrite: Replace existing output files instead of refusing. A failure before
             the final file moves leaves no new outputs; a failure during those moves
             can leave partial outputs that require ``overwrite`` for a retry.
@@ -560,7 +574,7 @@ def _execute_run(
     attributes = cast(dict[str, object], cast(list[object], report[str(model_label)])[2])
     mx = cast("Mlx", import_mlx())
     stages: dict[str, dict[str, object]] = {}
-    image, mask, facts = run_native_pipeline(
+    image, reconstruction, mask, facts = run_native_pipeline(
         source_ct_ras=geometry.source_data,
         organ_mask_ras=geometry.organ_mask,
         bbox_mask_ras=geometry.bbox_mask,
@@ -578,6 +592,7 @@ def _execute_run(
         image_data=image,
         lesion_data=mask,
         output_region=options.output_region,
+        input_reconstruction=reconstruction,
     )
     spec: GenerationSpec = {
         "schema_version": "medmlx.lesiondiffusion.generation.v1",
@@ -667,7 +682,7 @@ def run_native_pipeline(
     on_stage_completed: Callable[[str, dict[str, object]], None],
     anatomy_mask_ras: HostArray | None = None,
     lesion_mask_ras: BoolArray | None = None,
-) -> tuple[HostArray, HostArray, NativeRuntime]:
+) -> tuple[HostArray, HostArray | None, HostArray, NativeRuntime]:
     """Run LMNet, then LINet and the VQ decoder, with the released EMA weights.
 
     Volumes are in standardized RAS ``(X, Y, Z)`` order on the even-padded grid and are
@@ -696,8 +711,10 @@ def run_native_pipeline(
             ``prepare_lesion_mask``; when given, LMNet is skipped.
 
     Returns:
-        ``(generated_ct, label_map, facts)``. ``generated_ct`` is the full
-        VQ-reconstructed CT, float32 HU clipped to [-1000, 1000]. ``label_map`` is
+        ``(generated_ct, input_reconstruction, label_map, facts)``. ``generated_ct`` is
+        the full VQ-reconstructed CT, float32 HU clipped to [-1000, 1000].
+        ``input_reconstruction`` decodes the unmodified input latent the same way, for
+        ``output_region="lesion"`` only, and is ``None`` otherwise. ``label_map`` is
         uint8 with 2 for lesion, 1 for the remaining organ voxels and 0 elsewhere.
         ``facts`` records the runtime settings.
 
@@ -735,7 +752,7 @@ def run_native_pipeline(
         lm_stage: dict[str, object] = {"status": "skipped", "reason": "supplied_lesion_mask"}
     on_stage_completed("lmnet", lm_stage)
     lin_attributes = _linet_attributes(attributes, options)
-    generated_ras, lin_stage = _run_linet(
+    generated_ras, reconstruction_ras, lin_stage = _run_linet(
         image, lesion, options, lin_attributes, directory, tokenizer_path, mx
     )
     on_stage_completed("linet", lin_stage)
@@ -773,7 +790,7 @@ def run_native_pipeline(
             "MLX native RNG; same seed is reproducible within MLX, not identical to Torch RNG"
         ),
     }
-    return generated_ras, lesion_ras, details
+    return generated_ras, reconstruction_ras, lesion_ras, details
 
 
 def _linet_attributes(
@@ -906,8 +923,12 @@ def _run_linet(
     directory: Path,
     tokenizer_path: Path,
     mx: Mlx,
-) -> tuple[HostArray, dict[str, object]]:
-    """Generate the lesion image using the selected mask and attributes."""
+) -> tuple[HostArray, HostArray | None, dict[str, object]]:
+    """Generate the lesion image using the selected mask and attributes.
+
+    Returns the generated CT and, for ``output_region="lesion"``, the decode of the
+    unmodified input latent; both are RAS float32 HU on the input's grid.
+    """
     lin_started = time.perf_counter()
     source_arithmetic = options.inference_mode == "source"
     linet = LdmUnet(
@@ -964,7 +985,10 @@ def _run_linet(
     denoiser = linet.__call__ if source_arithmetic else mx.compile(linet.__call__)
     mx.eval(mask)
     sampling_started = time.perf_counter()
-    generated = sampler(denoiser, condition, latent[selection], mask=mask[selection])
+    # Kept for the input reconstruction; the sampler leaves the rest of the latent as is.
+    input_window = latent[selection]
+    mx.eval(input_window)
+    generated = sampler(denoiser, condition, input_window, mask=mask[selection])
     latent[selection] = generated.astype(mx.float16)
     mx.eval(latent)
     if not bool(mx.all(mx.isfinite(latent)).item()):
@@ -976,12 +1000,18 @@ def _run_linet(
     mx.clear_cache()
     decode_started = time.perf_counter()
     generated_ras = _decode_ct(decoder, latent, decode_dtype, mx)
+    reconstruction_ras: HostArray | None = None
+    if options.output_region == "lesion":
+        mx.clear_cache()
+        latent[selection] = input_window
+        reconstruction_ras = _decode_ct(decoder, latent, decode_dtype, mx)
     decode_elapsed = time.perf_counter() - decode_started
     lin_stage: dict[str, object] = {
         "status": "completed",
         "device": str(mx.default_device()),
         "dtype": "float16",
         "decode_dtype": "float16" if source_arithmetic else "float32",
+        "input_reconstruction_decoded": reconstruction_ras is not None,
         "crop_shape": list(LINET_CROP),
         "latent_shape": list(latent.shape),
         "output_shape": list(image.shape),
@@ -996,7 +1026,7 @@ def _run_linet(
         "decode_and_export_s": decode_elapsed,
         "synchronized_elapsed_s": time.perf_counter() - lin_started,
     }
-    return generated_ras, lin_stage
+    return generated_ras, reconstruction_ras, lin_stage
 
 
 def _decode_ct(decoder: VqAutoencoder, latent: Array, dtype: Dtype, mx: Mlx) -> FloatArray:
@@ -1889,6 +1919,7 @@ def materialize_arrays(
     image_data: HostArray,
     lesion_data: HostArray,
     output_region: str = DEFAULT_OUTPUT_REGION,
+    input_reconstruction: HostArray | None = None,
 ) -> tuple[OutputValidation, dict[str, object] | None]:
     """Validate the generated arrays and write every output NIfTI file.
 
@@ -1907,21 +1938,27 @@ def materialize_arrays(
         geometry: Standardized inputs; ``output_reference`` defines the written grid.
         image_data: Generated CT (HU) on the even-padded grid.
         lesion_data: Label map on the same grid; 2 marks the lesion.
-        output_region: ``"full"`` or ``"box"``; see ``run``.
+        output_region: ``"full"``, ``"box"`` or ``"lesion"``; see ``run``.
+        input_reconstruction: Decode of the unmodified input latent on the same grid;
+            required for, and only used by, ``output_region="lesion"``.
 
     Returns:
-        ``(output_validation, compositing)``; ``compositing`` is ``None`` unless
-        ``output_region="box"``.
+        ``(output_validation, compositing)``; ``compositing`` is ``None`` for
+        ``output_region="full"``.
 
     Raises:
-        ModelExecutionError: If shapes differ from the grid, values are non-finite, or
-            the label map has no lesion.
+        ModelExecutionError: If shapes differ from the grid, values are non-finite, the
+            label map has no lesion, or ``"lesion"`` lacks the input reconstruction.
     """
     if (
         image_data.shape != geometry.reference.shape
         or lesion_data.shape != geometry.reference.shape
     ):
         raise ModelExecutionError("LesionDiffusion generated arrays differ from the input grid")
+    if output_region == "lesion" and (
+        input_reconstruction is None or input_reconstruction.shape != image_data.shape
+    ):
+        raise ModelExecutionError("LesionDiffusion lesion output needs the input reconstruction")
     if not np.all(np.isfinite(image_data)) or not np.all(np.isfinite(lesion_data)):
         raise ModelExecutionError("LesionDiffusion generated arrays contain non-finite voxels")
     lesion = (lesion_data[_input_grid(geometry.output_reference)] == 2).astype(np.uint8)
@@ -1963,6 +2000,14 @@ def materialize_arrays(
             "start_voxel": [int(part.start) for part in box],
             "stop_voxel_exclusive": [int(part.stop) for part in box],
         }
+        images = [(localized, "synthetic_image"), (image_data, "raw_synthetic_image")]
+    elif output_region == "lesion":
+        localized, compositing = apply_lesion_change(
+            original=geometry.source_data,
+            generated=cast(NumericArray, image_data),
+            reconstruction=cast(NumericArray, input_reconstruction),
+            lesion=lesion_data == 2,
+        )
         images = [(localized, "synthetic_image"), (image_data, "raw_synthetic_image")]
     organ = np.where(geometry.organ_mask, geometry.organ_label, 0).astype(np.uint8)
     writes: list[tuple[HostArray, str, type[np.generic]]] = [
@@ -2018,13 +2063,13 @@ def _input_grid(reference: NiftiImage) -> tuple[slice, ...]:
 
 
 def output_paths(output: Path, output_region: str = DEFAULT_OUTPUT_REGION) -> dict[str, Path]:
-    """Map each output role to its file; ``box`` mode adds ``raw_synthetic_image``."""
+    """Map each output role to its file; ``box`` and ``lesion`` add ``raw_synthetic_image``."""
     paths = {
         "synthetic_image": output / _SYNTHETIC_CT,
         "target_mask": output / _LESION_MASK,
         "organ_mask": output / _ORGAN_MASK,
     }
-    if output_region == "box":
+    if output_region in {"box", "lesion"}:
         paths["raw_synthetic_image"] = output / _RAW_SYNTHETIC_CT
     return paths
 
@@ -2112,6 +2157,81 @@ def localize_output(
             "weighted_voxel_count": int(np.count_nonzero(affected)),
         },
         "outside_affected_region": "original_ct_cast_float32",
+    }
+
+
+def apply_lesion_change(
+    *,
+    original: NumericArray,
+    generated: NumericArray,
+    reconstruction: NumericArray,
+    lesion: BoolArray,
+    reach_voxels: int = DECODER_REACH_VOXELS,
+) -> tuple[FloatArray, dict[str, object]]:
+    """Add the lesion's change to the original CT around the lesion.
+
+    The change is ``generated - reconstruction``: the decode of the inpainted latent
+    minus the decode of the unmodified input latent. Both decodes carry the VQ
+    autoencoder's own reconstruction error, an HU offset whose size and sign depend on
+    the encoded volume, so their difference keeps what inpainting changed and drops
+    that offset. The change is added to the original CT within ``reach_voxels`` of a
+    lesion voxel along every axis, the decoder's receptive field; every other voxel is
+    the original CT converted to float32. Inside the lesion the result keeps the input
+    detail the autoencoder does not reproduce, including its noise grain.
+
+    Args:
+        original: Standardized input CT (HU) on the even-padded grid.
+        generated: Decode of the inpainted latent on the same grid.
+        reconstruction: Decode of the unmodified input latent on the same grid.
+        lesion: Boolean lesion mask on the same grid.
+        reach_voxels: Per-axis reach of the change from a lesion voxel.
+
+    Returns:
+        ``(localized_ct, facts)``: a float32 array and a record of the policy, including
+        the mean reconstruction offset (HU) removed outside the lesion.
+
+    Raises:
+        ModelExecutionError: If the arrays differ in shape or the lesion is empty.
+    """
+    from scipy.ndimage import maximum_filter
+
+    if not original.shape == generated.shape == reconstruction.shape == lesion.shape:
+        raise ModelExecutionError("LesionDiffusion lesion change arrays differ in shape")
+    points = np.argwhere(lesion)
+    if points.size == 0:
+        raise ModelExecutionError("LesionDiffusion lesion change needs a non-empty lesion")
+    low = np.maximum(points.min(axis=0) - reach_voxels, 0)
+    high = np.minimum(points.max(axis=0) + reach_voxels + 1, np.asarray(original.shape[:3]))
+    region = cast(
+        tuple[slice, slice, slice],
+        tuple(slice(int(a), int(b)) for a, b in zip(low, high, strict=True)),
+    )
+    # A cubic maximum filter marks every voxel within reach of a lesion voxel per axis.
+    reached = maximum_filter(lesion[region].astype(np.uint8), size=2 * reach_voxels + 1) > 0
+    change = np.asarray(generated[region], dtype=np.float32) - np.asarray(
+        reconstruction[region], dtype=np.float32
+    )
+    localized = np.asarray(original, dtype=np.float32).copy()
+    window = localized[region]
+    window[reached] += change[reached]
+    # Decodes are clipped to +-1000 HU, so the offset is measured inside that range only.
+    input_window = np.asarray(original[region], dtype=np.float64)
+    surroundings = reached & ~lesion[region] & (np.abs(input_window) < 1000)
+    offset = (
+        np.asarray(reconstruction[region], dtype=np.float64)[surroundings]
+        - input_window[surroundings]
+    )
+    return localized, {
+        "policy": "original_plus_generated_minus_input_reconstruction",
+        "reach_voxels": reach_voxels,
+        "reach_metric": "per_axis_voxel_distance_from_nearest_lesion_voxel",
+        "changed_region": {
+            "start_voxel": [int(value) for value in low],
+            "stop_voxel_exclusive": [int(value) for value in high],
+            "voxel_count": int(np.count_nonzero(reached)),
+        },
+        "input_reconstruction_offset_hu": round(float(offset.mean()), 3) if offset.size else None,
+        "outside_changed_region": "original_ct_cast_float32",
     }
 
 

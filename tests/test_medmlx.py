@@ -72,6 +72,42 @@ def test_upstream_threshold_selection() -> None:
     assert np.array_equal(medmlx.select_lesion_component(samples * 0.1, box), fixture["empty"])
 
 
+def test_lesion_output_cancels_reconstruction_offset_and_keeps_distant_input() -> None:
+    """Lesion output adds only the inpainted change; voxels beyond reach keep the input."""
+    rng = np.random.default_rng(7)
+    original = rng.normal(40.0, 15.0, (24, 20, 18)).astype(np.float32)
+    # Bone above the decoders' 1000 HU clip, beyond and within the lesion's reach.
+    original[0, 0, 0] = original[8, 6, 5] = 1500.0
+    lesion = np.zeros(original.shape, dtype=bool)
+    lesion[10:13, 8:11, 7:10] = True
+    # The autoencoder shifts every decoded voxel by -9 HU; inpainting darkens the
+    # lesion by 30 HU and its first surrounding shell by 2 HU.
+    reconstruction = np.clip(original, -1000, 1000) - 9.0
+    generated = reconstruction.copy()
+    shell = np.zeros(original.shape, dtype=bool)
+    shell[9:14, 7:12, 6:11] = True
+    generated[shell] -= 2.0
+    generated[lesion] -= 28.0
+
+    localized, facts = medmlx.apply_lesion_change(
+        original=original,
+        generated=generated,
+        reconstruction=reconstruction,
+        lesion=lesion,
+        reach_voxels=3,
+    )
+
+    reached = np.zeros(original.shape, dtype=bool)
+    reached[7:16, 5:14, 4:13] = True
+    np.testing.assert_array_equal(localized[~reached], original[~reached])
+    assert localized[8, 6, 5] == 1500.0
+    np.testing.assert_allclose(localized[lesion], original[lesion] - 30.0, atol=1e-4)
+    np.testing.assert_allclose(
+        localized[shell & ~lesion], original[shell & ~lesion] - 2.0, atol=1e-4
+    )
+    assert facts["input_reconstruction_offset_hu"] == pytest.approx(-9.0)
+
+
 def _host(arrays: dict[str, HostArray]) -> dict[str, HostArray]:
     """Convert a mapping of native fixture arrays to host arrays."""
     return {key: cast(NumericArray, np.array(value)) for key, value in arrays.items()}

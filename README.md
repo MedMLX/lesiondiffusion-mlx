@@ -25,8 +25,9 @@ Add synthetic lesions to CT with native MLX, with controls for organ, size, plac
 
 Both measurements used an AMOS case 0008 crop and 200 diffusion steps: FP32 LMNet and
 text encoders, FP16 LINet and VQ encoder, and an FP32 VQ decoder in conditioned mode
-(FP16 in source mode). They do not measure larger volumes. Peak MLX memory excludes
-host preprocessing and other applications.
+(FP16 in source mode). `output_region="lesion"` decodes twice in sequence without
+raising the peak. They do not measure larger volumes. Peak MLX memory excludes host
+preprocessing and other applications.
 
 ## Use with MedMLX
 
@@ -88,7 +89,7 @@ own copy, pass a folder containing `model.safetensors` and `tokenizer.json` as
 | `bbox_center_voxel` | Optional `[I, J, K]` box center on the standardized grid; placement is automatic otherwise |
 | `diffusion_steps`, `seed` | Sampling controls; the upstream defaults are 200 and 23 |
 | `inference_mode` | `"conditioned"` (default) or `"source"`; see below |
-| `output_region` | `"full"` (default) or `"box"` |
+| `output_region` | `"full"` (default), `"box"` or `"lesion"`; see below |
 | `weights_path` | Optional folder containing `model.safetensors` and `tokenizer.json` |
 | `overwrite` | `False` by default; existing outputs are never replaced |
 
@@ -108,9 +109,20 @@ the box or organ.
 
 The outputs are `synthetic_ct.nii.gz` (float32 HU), `lesion_mask.nii.gz` and
 `organ_mask.nii.gz` (uint8) on the standardized grid. The decoder reconstructs the
-whole CT, so voxels outside the lesion can change. `output_region="box"` keeps the
-generated CT only over the lesion box, feathers it into the input over 6 mm and also
-writes the full reconstruction as `raw_synthetic_ct.nii.gz`. `run` returns `{"outputs": {...}, "details": {...}}`, with run metadata in `details`.
+whole CT, and that reconstruction does not reproduce the input exactly: away from the
+lesion it shifts attenuation by several HU, by an amount that depends on the volume.
+`output_region` controls how much of it reaches `synthetic_ct.nii.gz`:
+
+- `"full"` writes the reconstruction as upstream does, so every voxel can change.
+- `"box"` keeps the reconstruction over the lesion box and feathers it into the input
+  over 6 mm. Tissue inside the box keeps the shift.
+- `"lesion"` also decodes the unchanged input and adds only the difference between
+  the two decodes to the input CT, within 33 voxels of the lesion along each axis.
+  The shift cancels, and voxels farther away are the input unchanged. Use it when
+  the surrounding anatomy should keep its measured values.
+
+`"box"` and `"lesion"` also write the full reconstruction as `raw_synthetic_ct.nii.gz`.
+`run` returns `{"outputs": {...}, "details": {...}}`, with run metadata in `details`.
 Invalid inputs raise `InvalidInputError`; missing
 or mismatched weights raise `AssetNotReadyError`. Synthetic output is not ground truth.
 
