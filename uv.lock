@@ -203,7 +203,7 @@ wheels = [
 
 [[package]]
 name = "lesiondiffusion-mlx"
-version = "0.2.7"
+version = "0.2.8"
 source = { editable = "." }
 dependencies = [
     { name = "medmlx-core" },
@@ -237,7 +237,7 @@ requires-dist = [
     { name = "einops", marker = "extra == 'dev'", specifier = ">=0.8.1,<0.9" },
     { name = "einops", marker = "extra == 'reference'", specifier = "==0.8.2" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.100,<7" },
-    { name = "medmlx-core", specifier = "==0.2.6" },
+    { name = "medmlx-core", specifier = ">=0.2.6,<0.3" },
     { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = "==0.32.4" },
     { name = "nibabel", specifier = ">=5.3,<6" },
     { name = "numpy", specifier = ">=2.2,<3" },

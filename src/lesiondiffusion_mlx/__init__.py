@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     )
     from lesiondiffusion_mlx.mlx_sampling import DdimSampler as DdimSampler
 
-__version__ = "0.2.7"
+__version__ = "0.2.8"
 
 __all__ = [
     "LINET_CONFIG",
