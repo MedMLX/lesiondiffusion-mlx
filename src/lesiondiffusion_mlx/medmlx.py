@@ -108,9 +108,9 @@ MODEL: Final[dict[str, str | float]] = {
         "Insert one phenotype-controlled synthetic lesion into a CT, given a binary organ "
         "mask, or inpaint a supplied binary lesion mask. Outputs use a RAS 1 mm grid."
     ),
-    # README: source mode (the larger of the two modes), 200 steps, 160x160x128
-    # RAS 1 mm AMOS case 0008 crop.
-    "peak_memory_gb": 3.46,
+    # README: conditioned mode (the larger of the two modes, with its FP32 VQ decoder),
+    # 200 steps, 160x160x128 RAS 1 mm AMOS case 0008 crop.
+    "peak_memory_gb": 5.19,
 }
 
 
@@ -405,9 +405,11 @@ def run(
         seed: Seeds box placement and native MLX sampling. MLX's RNG differs from
             Torch's, so a seed repeats within MLX only.
         inference_mode: ``"conditioned"`` uses native MLX FP16 convolution and the
-            trained LINet text path, with resampling at output-affine coordinates.
-            ``"source"`` reproduces upstream's disabled image text path, Torch CPU
-            reduction order and legacy ``zoom`` resampling coordinates.
+            trained LINet text path, with resampling at output-affine coordinates, and
+            decodes the VQ latent in FP32. ``"source"`` reproduces upstream's disabled
+            image text path, Torch CPU reduction order, legacy ``zoom`` resampling
+            coordinates and FP16 VQ decoding, which overflows to non-finite values on
+            some inputs and then raises ``ModelExecutionError``.
         output_region: ``"full"`` writes upstream's full-volume reconstruction, whose HU
             are clipped to [-1000, 1000] and can differ from the input outside the
             lesion. ``"box"`` keeps the generated CT over the box, widened to the
@@ -740,7 +742,12 @@ def run_native_pipeline(
     lesion_ras = source_to_ras(np.where(lesion, 2, organ.astype(np.uint8)))
     details: NativeRuntime = {
         "device": str(mx.default_device()),
-        "dtype": {"lmnet": "float32", "linet": "float16", "vq": "float16"},
+        "dtype": {
+            "lmnet": "float32",
+            "linet": "float16",
+            "vq_encoder": "float16",
+            "vq_decoder": "float16" if options.inference_mode == "source" else "float32",
+        },
         "inference_mode": options.inference_mode,
         "convolution_arithmetic": (
             "torch_cpu_source_reduction" if options.inference_mode == "source" else "mlx_native"
@@ -915,14 +922,28 @@ def _run_linet(
         mx,
         source_arithmetic=source_arithmetic,
     )
+    # Source mode keeps upstream's FP16 decoder. Conditioned mode decodes in FP32
+    # because the activation after the decoder's upsampling convolution can exceed
+    # the FP16 maximum of 65504 (about 7.5e4 on a generated abdomen), and the
+    # following GroupNorm turns the resulting infinity into NaN.
+    decode_dtype = mx.float16 if source_arithmetic else mx.float32
+    decoder = (
+        vq
+        if source_arithmetic
+        else VqAutoencoder(
+            load_stage(directory, "vq", mx, dtype=mx.float32), mx, source_arithmetic=False
+        )
+    )
     nax_convolutions = len(linet.nax_weights) + len(vq.nax_weights)
+    if decoder is not vq:
+        nax_convolutions += len(decoder.nax_weights)
     condition: Array | None = None
     if not source_arithmetic:
         text = BiomedTextEncoder(load_stage(directory, "linet_text", mx, dtype=mx.float32), mx)
         condition = encode_attributes(lin_attributes, text, tokenizer_path, mx)
         del text
     # Force the lazy weight loads here so load_and_condition_s measures them.
-    mx.eval(*linet.weights.values(), *vq.weights.values())
+    mx.eval(*linet.weights.values(), *vq.weights.values(), *decoder.weights.values())
     load_elapsed = time.perf_counter() - lin_started
     encode_started = time.perf_counter()
     native_image = piecewise_ct(cast(ArrayConstructor, mx.array)(image[None, None]), mx).astype(
@@ -954,22 +975,13 @@ def _run_linet(
     gc.collect()
     mx.clear_cache()
     decode_started = time.perf_counter()
-    decoded = vq.decode(latent)
-    mx.eval(decoded)
-    if not bool(mx.all(mx.isfinite(decoded)).item()):
-        raise ModelExecutionError(
-            "Native VQ decoder produced non-finite voxels before CT remapping"
-        )
-    decoded = piecewise_ct(decoded.astype(mx.float32), mx, inverse=True)
-    mx.eval(decoded)
-    if not bool(mx.all(mx.isfinite(decoded)).item()):
-        raise ModelExecutionError("Native LINet/VQ produced non-finite CT voxels")
-    generated_ras = source_to_ras(np.array(decoded)[0, 0]).astype(np.float32)
+    generated_ras = _decode_ct(decoder, latent, decode_dtype, mx)
     decode_elapsed = time.perf_counter() - decode_started
     lin_stage: dict[str, object] = {
         "status": "completed",
         "device": str(mx.default_device()),
         "dtype": "float16",
+        "decode_dtype": "float16" if source_arithmetic else "float32",
         "crop_shape": list(LINET_CROP),
         "latent_shape": list(latent.shape),
         "output_shape": list(image.shape),
@@ -985,6 +997,28 @@ def _run_linet(
         "synchronized_elapsed_s": time.perf_counter() - lin_started,
     }
     return generated_ras, lin_stage
+
+
+def _decode_ct(decoder: VqAutoencoder, latent: Array, dtype: Dtype, mx: Mlx) -> FloatArray:
+    """Decode a source-layout latent to a RAS CT in HU (float32, clipped to +-1000).
+
+    Raises:
+        ModelExecutionError: If the decoder or the HU remapping yields non-finite voxels.
+    """
+    decoded = decoder.decode(latent.astype(dtype))
+    mx.eval(decoded)
+    if not bool(mx.all(mx.isfinite(decoded)).item()):
+        overflow = (
+            " (FP16 overflow; conditioned mode decodes in FP32)" if dtype == mx.float16 else ""
+        )
+        raise ModelExecutionError(
+            f"Native VQ decoder produced non-finite voxels before CT remapping{overflow}"
+        )
+    decoded = piecewise_ct(decoded.astype(mx.float32), mx, inverse=True)
+    mx.eval(decoded)
+    if not bool(mx.all(mx.isfinite(decoded)).item()):
+        raise ModelExecutionError("Native LINet/VQ produced non-finite CT voxels")
+    return source_to_ras(np.array(decoded)[0, 0]).astype(np.float32)
 
 
 def _linet_latent_window(lesion: BoolArray) -> tuple[slice, slice, slice]:
