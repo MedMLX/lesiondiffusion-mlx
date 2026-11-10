@@ -9,9 +9,11 @@ absolute tumor mean. Feature scaling is fitted on training patients only.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.metadata
 import json
 from collections import Counter
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
@@ -29,7 +31,7 @@ from lesiondiffusion_mlx.mlx_pipeline import (
 
 from lesioncontrol.backend import require_metal
 from lesioncontrol.learned import CONTEXT_FIELDS
-from lesioncontrol.profile import build_profile, save_profile
+from lesioncontrol.profile import build_profile, default_settings, save_profile
 
 if TYPE_CHECKING:
     from lesiondiffusion_mlx._typing import Mlx
@@ -74,16 +76,79 @@ def _attributes(mean_hu: float) -> dict[str, object]:
     return fields
 
 
+def _file_record(path: Path) -> dict[str, object]:
+    """Identify a local file, including replacements that preserve size and mtime."""
+    path = path.resolve()
+    stat = path.stat()
+    return {
+        "path": str(path),
+        "size": stat.st_size,
+        "mtime": stat.st_mtime_ns,
+        "ctime": stat.st_ctime_ns,
+        "device": stat.st_dev,
+        "inode": stat.st_ino,
+    }
+
+
+def _model_identity(path: Path) -> dict[str, object]:
+    """Stream a functional cache key once for each consumed checkpoint/tokenizer file."""
+    path = path.resolve()
+    identity = hashlib.sha256()
+    with path.open("rb") as stream:
+        while block := stream.read(8 << 20):
+            identity.update(block)
+    return {"path": str(path), "content_key": identity.hexdigest()}
+
+
+def _bundle_provenance(weights: Path) -> dict[str, object]:
+    """Record the frozen encoder, tokenizer, extractor and preprocessing contract once."""
+    from lesiondiffusion_mlx import mlx_model, mlx_pipeline
+
+    from lesioncontrol import profile
+
+    return {
+        "schema": "lesioncontrol.training_cache_provenance.v2",
+        "model_files": [
+            _model_identity(weights / name) for name in ("model.safetensors", "tokenizer.json")
+        ],
+        "implementation_files": [
+            _file_record(Path(__file__)),
+            *[
+                _file_record(Path(module.__file__))
+                for module in (mlx_model, mlx_pipeline, profile)
+                if module.__file__ is not None
+            ],
+        ],
+        "extractor_settings": asdict(default_settings()),
+        "target_space": "liver_contrast",
+        "context_fields": list(CONTEXT_FIELDS),
+        "preprocessing": "RAS to source; piecewise CT; FP16 input and conditioned VQ encoder",
+        "latent_quantized": False,
+        "saved_dtype": "float32",
+        "versions": {
+            name: importlib.metadata.version(name)
+            for name in (
+                "mlx",
+                "mlxradiomics",
+                "lesiondiffusion-mlx",
+                "numpy",
+                "safetensors",
+                "tokenizers",
+            )
+        },
+    }
+
+
 def cache_training_data(
     manifest_path: Path, weights: Path, output: Path, maximum_cases: int | None = None
 ) -> Path:
     """Encode an owned prepared dataset and fit equal-patient training feature scales.
 
-    Completed samples are reusable only with identical input paths, sizes and
-    modification times. A capped cache is explicitly marked incomplete and is
-    intended only for real-data CUDA preflight, never full adapter training.
+    Completed samples require unchanged input/model/tokenizer file identities,
+    encoder/preprocessing code, extraction settings and package versions. A capped
+    cache is explicitly marked incomplete and is intended only for real-data CUDA
+    preflight, never full adapter training.
     """
-    require_metal()
     runtime = cast("Mlx", mx)
     payload = cast(dict[str, object], json.loads(manifest_path.read_text()))
     if payload["schema"] != "lesioncontrol.real_hcc_training_data.v1":
@@ -93,27 +158,30 @@ def cache_training_data(
     if not selected or maximum_cases is not None and maximum_cases < 1:
         raise ValueError("The cache requires at least one prepared real tumor")
     output.mkdir(parents=True, exist_ok=True)
+    provenance_path = output / "provenance.json"
+    # Normalize tuples to the same JSON arrays read on resume. Model content keys
+    # are functional cache identity; medical inputs retain filesystem provenance.
+    provenance = cast(dict[str, object], json.loads(json.dumps(_bundle_provenance(weights))))
+    if provenance_path.exists():
+        if json.loads(provenance_path.read_text()) != provenance:
+            raise ValueError(
+                "Existing training cache has different model or preprocessing provenance"
+            )
+    elif any((output / f"{case['id']}.json").exists() for case in selected):
+        raise ValueError("Existing training cache lacks bundle provenance; rebuild it")
+    else:
+        provenance_path.write_text(json.dumps(provenance, indent=2, allow_nan=False) + "\n")
     records: list[BundleCase] = []
     vectors: list[np.ndarray[tuple[int, ...], np.dtype[np.float64]]] = []
     feature_names: list[str] = []
-    encoder = VqAutoencoder(
-        load_stage(weights, "vq", runtime, dtype=mx.float16), runtime, source_arithmetic=False
-    )
-    text = BiomedTextEncoder(load_stage(weights, "linet_text", runtime, dtype=mx.float32), runtime)
-    runtime.eval(*encoder.weights.values(), *text.weights.values())
+    encoder: VqAutoencoder | None = None
+    text: BiomedTextEncoder | None = None
     tokenizer = weights / "tokenizer.json"
     for case in selected:
         if case["partition"] not in ("train", "selection"):
             raise ValueError("Only the registered train/selection cohorts may be cached")
         paths = [Path(case[name]) for name in ("real_ct", "real_mask", "real_liver_mask")]
-        inputs = [
-            {
-                "path": str(path.resolve()),
-                "size": path.stat().st_size,
-                "mtime": path.stat().st_mtime_ns,
-            }
-            for path in paths
-        ]
+        inputs = [_file_record(path) for path in paths]
         destination = output / f"{case['id']}.npz"
         record_path = output / f"{case['id']}.json"
         if record_path.exists():
@@ -128,6 +196,23 @@ def cache_training_data(
                 raise FileExistsError(
                     f"Incomplete encoded sample requires inspection: {destination}"
                 )
+            if encoder is None or text is None:
+                require_metal()
+                encoder = VqAutoencoder(
+                    load_stage(
+                        weights,
+                        "vq",
+                        runtime,
+                        dtype=mx.float16,
+                        prefixes=("encoder.", "quant_conv."),
+                    ),
+                    runtime,
+                    source_arithmetic=False,
+                )
+                text = BiomedTextEncoder(
+                    load_stage(weights, "linet_text", runtime, dtype=mx.float32), runtime
+                )
+                runtime.eval(*encoder.weights.values(), *text.weights.values())
             profile = build_profile(*paths, target_space="liver_contrast")
             save_profile(profile, output / f"{case['id']}.profile.json")
             feature_names = sorted(profile.features)
@@ -213,13 +298,19 @@ def cache_training_data(
     scale = np.sqrt(np.average((matrix - center) ** 2, axis=0, weights=sample_weights))
     constant = scale == 0
     scale[constant] = 1
-    schedule = load_stage(weights, "linet", runtime, dtype=mx.float32)["alphas_cumprod"]
-    runtime.eval(schedule)
-    np.save(output / "alphas_cumprod.npy", np.array(schedule, dtype=np.float32), allow_pickle=False)
+    schedule_path = output / "alphas_cumprod.npy"
+    if not schedule_path.exists():
+        require_metal()
+        schedule = load_stage(
+            weights, "linet", runtime, dtype=mx.float32, prefixes=("alphas_cumprod",)
+        )["alphas_cumprod"]
+        runtime.eval(schedule)
+        np.save(schedule_path, np.array(schedule, dtype=np.float32), allow_pickle=False)
     index = {
         "schema": "lesioncontrol.adapter_training_bundle.v1",
         "dataset_complete": maximum_cases is None,
         "source_manifest": str(manifest_path.resolve()),
+        "provenance_file": provenance_path.name,
         "target_space": "liver_contrast",
         "feature_names": feature_names,
         "feature_center": center.tolist(),
