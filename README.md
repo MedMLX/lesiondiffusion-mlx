@@ -19,17 +19,17 @@ Add synthetic lesions to CT with native MLX, with controls for organ, size, plac
 
 </div>
 
-| | |
+| Input | Output |
 | :--- | :--- |
-| **Input** | CT + aligned binary organ mask |
-| **Output** | Synthetic CT and lesion mask |
-| **Hardware** | Apple Silicon with Metal; **5.19 GB** peak MLX memory for `lesiondiffusion` in the default conditioned mode and **3.46 GB** in source mode on a 160×160×128, 1 mm RAS crop. |
+| CT + aligned binary organ mask | Synthetic CT and lesion mask |
 
-Both measurements used an AMOS case 0008 crop and 200 diffusion steps: FP32 LMNet and
-text encoders, FP16 LINet and VQ encoder, and an FP32 VQ decoder in conditioned mode
-(FP16 in source mode). `output_region="lesion"` decodes twice in sequence without
-raising the peak. They do not measure larger volumes. Peak MLX memory excludes host
-preprocessing and other applications.
+| Model | Weights download | Peak MLX memory | Measured on |
+| :--- | ---: | ---: | :--- |
+| `lesiondiffusion`, conditioned mode (default) | 1.7 GB | 5.19 GB | 160×160×128, 1 mm RAS crop, 200 diffusion steps |
+| `lesiondiffusion`, source mode | 1.7 GB | 3.46 GB | 160×160×128, 1 mm RAS crop, 200 diffusion steps |
+
+Requires Apple Silicon with Metal. The [technical notes](https://github.com/MedMLX/lesiondiffusion-mlx/blob/main/docs/technical.md)
+give the precision of each network in these measurements.
 
 ## Use with MedMLX
 
@@ -71,9 +71,10 @@ result = run(
 print(result["outputs"]["synthetic_image"])
 ```
 
-Weights download from `MedMLX/lesiondiffusion-mlx` on first use. Use `medmlx setup lesiondiffusion` to download ahead of time. To use your
-own copy, pass a folder containing `model.safetensors` and `tokenizer.json` as
-`weights_path`. Conversion receipts are not required.
+Weights download from `MedMLX/lesiondiffusion-mlx` on first use; `medmlx setup lesiondiffusion`
+downloads them ahead of time. To use your own copy, pass a folder containing
+`model.safetensors` and `tokenizer.json` as `weights_path`. Conversion receipts are not
+required.
 
 ### Inputs and outputs
 
@@ -95,49 +96,47 @@ own copy, pass a folder containing `model.safetensors` and `tokenizer.json` as
 | `weights_path` | Optional folder containing `model.safetensors` and `tokenizer.json` |
 | `overwrite` | `False` by default; existing outputs are never replaced |
 
-The phenotype text arguments `shape`, `density`, `density_variation`, `enhancement`,
-`surface`, `adjacent_relationship` and `specific_features` default to the upstream
-wording (irregular, hypodense, heterogeneous, non-contrast CT, ill-defined margin).
-They condition the generator but do not guarantee a particular HU contrast or
-appearance.
+**Phenotype text.** `shape`, `density`, `density_variation`, `enhancement`, `surface`,
+`adjacent_relationship` and `specific_features` default to the upstream wording
+(irregular, hypodense, heterogeneous, non-contrast CT, ill-defined margin). They
+condition the generator but do not guarantee a particular HU contrast or appearance.
 
-The CT and masks must be finite, axis-aligned grids that match after they are
-reoriented and resampled to RAS 1 mm; oblique or sheared grids are refused. They must
-fit the 64×152×152 mask crop and the 128×128×128 inpainting crop (Z, Y, X); with
-`lesion_mask_path` only the inpainting crop applies. A supplied lesion mask must be a
-single connected component that overlaps the organ mask, so split multifocal
-segmentations first. The box guides generation, but generated lesions can extend past
-the box or organ.
+**Input geometry**
 
-The outputs are `synthetic_ct.nii.gz` (float32 HU), `lesion_mask.nii.gz` and
-`organ_mask.nii.gz` (uint8) on the standardized grid. The decoder reconstructs the
-whole CT, and that reconstruction does not reproduce the input exactly: away from the
-lesion it shifts attenuation by several HU, by an amount that depends on the volume.
+- The CT and masks must be finite, axis-aligned grids that match after they are
+  reoriented and resampled to RAS 1 mm; oblique or sheared grids are refused.
+- They must fit the 64×152×152 mask crop and the 128×128×128 inpainting crop (Z, Y, X);
+  with `lesion_mask_path` only the inpainting crop applies.
+- A supplied lesion mask must be a single connected component that overlaps the organ
+  mask, so split multifocal segmentations first.
+- The box guides generation, but generated lesions can extend past the box or organ.
+
+**Outputs.** `synthetic_ct.nii.gz` (float32 HU), `lesion_mask.nii.gz` and
+`organ_mask.nii.gz` (uint8) on the standardized grid. The decoder reconstructs the whole
+CT, and that reconstruction does not reproduce the input exactly: away from the lesion
+it shifts attenuation by several HU, by an amount that depends on the volume.
 `output_region` controls how much of it reaches `synthetic_ct.nii.gz`:
 
-- `"full"` writes the reconstruction as upstream does, so every voxel can change.
-- `"box"` keeps the reconstruction over the lesion box and feathers it into the input
-  over 6 mm. Tissue inside the box keeps the shift.
-- `"lesion"` also decodes the unchanged input and adds only the difference between
-  the two decodes to the input CT, within 33 voxels of the lesion along each axis.
-  The shift cancels, and voxels farther away are the input unchanged. Use it when
-  the surrounding anatomy should keep its measured values.
+| `output_region` | `synthetic_ct.nii.gz` holds |
+| :--- | :--- |
+| `"full"` (default) | The reconstruction, as upstream writes it, so every voxel can change |
+| `"box"` | The reconstruction over the lesion box, feathered into the input over 6 mm. Tissue inside the box keeps the shift |
+| `"lesion"` | Also decodes the unchanged input, and adds only the difference between the two decodes to the input CT, within 33 voxels of the lesion along each axis. The shift cancels, and voxels farther away are the input unchanged. Use it when the surrounding anatomy should keep its measured values |
 
 `"box"` and `"lesion"` also write the full reconstruction as `raw_synthetic_ct.nii.gz`.
 `run` returns `{"outputs": {...}, "details": {...}}`, with run metadata in `details`.
-Invalid inputs raise `InvalidInputError`; missing
-or mismatched weights raise `AssetNotReadyError`. Synthetic output is not ground truth.
+Invalid inputs raise `InvalidInputError`; missing or mismatched weights raise
+`AssetNotReadyError`. Synthetic output is not ground truth.
 
 ### Inference modes
 
-`"conditioned"`, the default, enables the inpainting network's trained text context,
-which the pinned upstream configuration turns off, and runs FP16 convolution, fused
-attention and compiled denoisers natively. It decodes in FP32, because the decoder's
-activations can exceed the FP16 range on some volumes. `"source"` follows the
-upstream inference configuration and arithmetic for reproduction, including FP16
-decoding; when that overflows, the run raises an error instead of writing a CT. Its
-results can differ from conditioned output. MLX and Torch random streams differ, so a seed repeats results
-only within MLX. Inference requires Apple Silicon with Metal.
+| `inference_mode` | Behaviour |
+| :--- | :--- |
+| `"conditioned"` (default) | Enables the inpainting network's trained text context, which the pinned upstream configuration turns off, and runs FP16 convolution, fused attention and compiled denoisers natively. Decodes in FP32, because the decoder's activations can exceed the FP16 range on some volumes |
+| `"source"` | Follows the upstream inference configuration and arithmetic for reproduction, including FP16 decoding; when that overflows, the run raises an error instead of writing a CT. Results can differ from conditioned output |
+
+MLX and Torch random streams differ, so a seed repeats results only within MLX.
+Inference requires Apple Silicon with Metal.
 
 ## License
 
