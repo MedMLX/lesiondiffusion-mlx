@@ -38,7 +38,7 @@ from lesiondiffusion_mlx._nax_conv import (
     pack_weight,
 )
 from lesiondiffusion_mlx._source_half import conv3d_half, group_norm_half
-from lesiondiffusion_mlx._spatial import upsample_nearest2
+from lesiondiffusion_mlx._spatial import resize_nearest
 from lesiondiffusion_mlx._typing import ArrayConstructor
 
 
@@ -95,6 +95,10 @@ class SourceLayers:
     for FP32 weights), pointwise convolution as a matmul, and single-pass group
     normalization with fused SiLU. Without it, float16 group normalization uses
     the source-ordered kernel.
+
+    ``prepack=False`` defers native convolution packing to the first call. VQ uses
+    this for its separate encoder/decoder bundles; compiled denoisers keep eager
+    packing so their traces do not contain weight reorders or evaluation.
     """
 
     def __init__(
@@ -104,6 +108,7 @@ class SourceLayers:
         *,
         source_arithmetic: bool = True,
         native_kernels: bool | None = None,
+        prepack: bool = True,
     ):
         """Initialize source-keyed weights and the selected native arithmetic."""
         self.weights = weights
@@ -118,7 +123,7 @@ class SourceLayers:
         # ``upsample_conv``. Source arithmetic governs only FP16 operations, so
         # FP32 weights are packed whenever native kernels are on.
         self.nax_weights: dict[str, Array] = {}
-        if self.native_kernels and nax_available(mx):
+        if prepack and self.native_kernels and nax_available(mx):
             packed_dtypes = (mx.float32,) if source_arithmetic else (mx.float16, mx.float32)
             for name, weight in weights.items():
                 if (
@@ -130,6 +135,26 @@ class SourceLayers:
                     pack = pack_upsample_weight if _UPSAMPLE_CONV.search(key) else pack_weight
                     self.nax_weights[key] = pack(weight, mx)
             mx.eval(*self.nax_weights.values())
+
+    def _packed_weight(self, key: str) -> Array | None:
+        """Pack a called layer once; VQ stages defer packing until their first use."""
+        packed = self.nax_weights.get(key)
+        if packed is not None:
+            return packed
+        weight = self.weights[key + ".weight"]
+        dtypes = (self.mx.float32,) if self.source_arithmetic else (
+            self.mx.float16, self.mx.float32
+        )
+        if not (
+            self.native_kernels and weight.dtype in dtypes
+            and nax_eligible(weight) and nax_available(self.mx)
+        ):
+            return None
+        pack = pack_upsample_weight if _UPSAMPLE_CONV.search(key) else pack_weight
+        packed = pack(weight, self.mx)
+        self.mx.eval(packed)
+        self.nax_weights[key] = packed
+        return packed
 
     def conv(self, x: Array, key: str, *, padding: int = 1, stride: int = 1) -> Array:
         """Apply a source-keyed 3-D convolution to channels-first ``(B, C, D, H, W)``.
@@ -144,7 +169,7 @@ class SourceLayers:
         weight, bias = self.weights[key + ".weight"], self.weights.get(key + ".bias")
         if x.dtype == mx.float16 and self.source_arithmetic:
             return conv3d_half(x, weight, bias, padding=padding, stride=stride, mx=mx)
-        packed = self.nax_weights.get(key)
+        packed = self._packed_weight(key)
         if (
             packed is not None
             and packed.ndim == 2
@@ -253,7 +278,7 @@ class SourceLayers:
         the FP32 sums.
         """
         mx = self.mx
-        packed = self.nax_weights.get(key)
+        packed = self._packed_weight(key)
         weight = self.weights[key + ".weight"]
         if packed is None or packed.ndim != 3 or x.dtype != weight.dtype:
             return self.conv(self.resize_nearest(x, tuple(2 * int(s) for s in x.shape[2:])), key)
@@ -287,7 +312,7 @@ class SourceLayers:
         rounding it and stores the FP32 sum.
         """
         mx = self.mx
-        packed = self.nax_weights.get(conv_key)
+        packed = self._packed_weight(conv_key)
         if (
             packed is None
             or packed.ndim != 2
@@ -353,16 +378,7 @@ class SourceLayers:
 
         Output index ``i`` reads input index ``floor(i * in_size / out_size)``.
         """
-        if len(shape) != 3:
-            raise ValueError("LesionDiffusion nearest resizing needs three spatial axes")
-        if x.ndim == 5 and min(x.shape) > 0 and shape == tuple(2 * s for s in x.shape[2:]):
-            # Both source decoders double every spatial axis. A single strided
-            # copy preserves their floor-index rule without three intermediates.
-            return upsample_nearest2(x, mx=self.mx)
-        for axis, target in enumerate(shape, start=2):
-            indices = self.mx.floor(self.mx.arange(target) * (x.shape[axis] / target))
-            x = self.mx.take(x, indices.astype(self.mx.int32), axis=axis)
-        return x
+        return resize_nearest(x, shape, mx=self.mx)
 
 
 class LdmUnet(SourceLayers):
@@ -655,6 +671,16 @@ class VqAutoencoder(SourceLayers):
     """
 
     _codebook_norm_cache: tuple[Array, Array] | None = None
+
+    def __init__(
+        self, weights: Mapping[str, Array], mx: Mlx, *,
+        source_arithmetic: bool = True, native_kernels: bool | None = None,
+    ):
+        """Keep only the supplied stage bundle and pack convolutions when called."""
+        super().__init__(
+            weights, mx, source_arithmetic=source_arithmetic,
+            native_kernels=native_kernels, prepack=False,
+        )
 
     def conv(self, x: Array, key: str, *, padding: int = 1, stride: int = 1) -> Array:
         """Apply ``SourceLayers.conv`` and evaluate the result."""

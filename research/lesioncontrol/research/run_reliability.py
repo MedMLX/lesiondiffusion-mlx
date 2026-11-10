@@ -16,6 +16,7 @@ from typing import Literal, TypedDict, cast
 
 import nibabel as nib
 import numpy as np
+from lesiondiffusion_mlx.medmlx import PreparedGeneration
 
 from lesioncontrol.backend import GenerationControls
 from lesioncontrol.controller import sample_reference
@@ -203,175 +204,183 @@ def run(root: Path) -> None:
             Path(case["placed_mask"]),
             known_tumor_mask=Path(case["known_tumors_mask"]),
         )
-        for seed in seeds:
-            pair: list[DrawRecord] = []
-            for gain in (0, 1):
-                with (root / "attempts.jsonl").open("a") as stream:
-                    stream.write(
-                        json.dumps(
+        with PreparedGeneration() as prepared:
+            for seed in seeds:
+                pair: list[DrawRecord] = []
+                for gain in (0, 1):
+                    with (root / "attempts.jsonl").open("a") as stream:
+                        stream.write(
+                            json.dumps(
+                                {
+                                    "patient": case["patient"],
+                                    "seed": seed,
+                                    "gain": gain,
+                                    "status": "started",
+                                }
+                            )
+                            + "\n"
+                        )
+                    output = root / "runs" / case["lesion"] / f"seed-{seed}" / f"gain-{gain}"
+                    comparison_path = output / "reference_comparison.json"
+                    if not comparison_path.exists():
+                        sample_reference(
+                            profile,
+                            host,
+                            controls,
+                            weights=Path(cast(str, plan["weights"])),
+                            output_dir=output,
+                            seed=seed,
+                            adapter=Path(cast(str, plan["adapter"])),
+                            adapter_gain=gain,
+                            prepared=prepared,
+                        )
+                    arguments = cast(
+                        dict[str, object], json.loads((output / "arguments.json").read_text())
+                    )
+                    if arguments["seed"] != seed or arguments["controls"] != asdict(controls):
+                        raise ValueError("Cached draw has different controls or seed")
+                    expected_paths = {
+                        "image_path": str(Path(case["clean_ct"]).resolve()),
+                        "organ_mask_path": str(Path(case["liver_mask"]).resolve()),
+                        "lesion_mask_path": str(Path(case["placed_mask"]).resolve()),
+                        "weights_path": str(Path(cast(str, plan["weights"])).resolve()),
+                    }
+                    if any(arguments.get(key) != value for key, value in expected_paths.items()):
+                        raise ValueError("Cached draw has different image, mask or base weights")
+                    learned = arguments.get("learned_adapter")
+                    if not isinstance(learned, dict):
+                        raise ValueError("Cached draw lacks learned adapter metadata")
+                    learned_fields = cast(dict[str, object], learned)
+                    cached_gain = learned_fields.get("gain")
+                    if (
+                        isinstance(cached_gain, bool)
+                        or not isinstance(cached_gain, int | float)
+                        or cached_gain != gain
+                        or learned_fields.get("checkpoint")
+                        != str(Path(cast(str, plan["adapter"])).resolve())
+                    ):
+                        raise ValueError("Cached draw has a different adapter checkpoint or gain")
+                    desired_mean_hu = profile.target_mean_hu + (
+                        host.ring_mean_hu if profile.target_space == "liver_contrast" else 0.0
+                    )
+                    if (
+                        arguments.get("conditioning_mean_hu") != desired_mean_hu
+                        or arguments.get("target_mean_hu")
+                        != desired_mean_hu + controls.numeric_offset
+                    ):
+                        raise ValueError("Cached draw has a different numeric HU condition")
+                    previous_profile = load_profile(output / "reference_profile.json")
+                    if (
+                        previous_profile.features != profile.features
+                        or previous_profile.target_space != profile.target_space
+                    ):
+                        raise ValueError("Cached draw used another reference target")
+                    validation = cast(
+                        dict[str, object], json.loads((output / "validation.json").read_text())
+                    )
+                    if validation["valid"] is not True or validation["actual_steps"] != 25:
+                        raise ValueError("Generated draw did not qualify")
+                    result = cast(
+                        dict[str, object], json.loads((output / "result.json").read_text())
+                    )
+                    outputs = cast(dict[str, str], result["outputs"])
+                    aligned_path = output / "mean_aligned_comparison.json"
+                    metrics_path = output / "reliability_metrics.json"
+                    if not aligned_path.exists() or not metrics_path.exists():
+                        image = np.asarray(
+                            nib.Nifti1Image.from_filename(outputs["synthetic_image"]).dataobj,
+                            dtype=np.float32,
+                        )
+                        relative = image - np.float32(host.ring_mean_hu)
+                        actual_mean = float(
+                            np.mean(relative[host.placement_mask], dtype=np.float64)
+                        )
+                        shift = profile.target_mean_hu - actual_mean
+                        aligned = relative + np.float32(shift)
+                        aligned_features = extract_features(
+                            aligned, host.placement_mask, profile.settings
+                        )
+                        comparison = compare_features(profile, aligned_features)
+                        write_json(
+                            aligned_path,
+                            {
+                                **comparison,
+                                "diagnostic": {
+                                    "uniform_shift_hu": shift,
+                                    "synthetic_image_unchanged": True,
+                                    "purpose": (
+                                        "Attenuation/bin-origin sensitivity; "
+                                        "not pure spatial-texture isolation"
+                                    ),
+                                },
+                            },
+                        )
+                        generated_ring = float(np.mean(image[host.ring_mask], dtype=np.float64))
+                        original_comparison = cast(
+                            dict[str, object], json.loads(comparison_path.read_text())
+                        )
+                        deviations = cast(
+                            dict[str, dict[str, float]], original_comparison["deviations"]
+                        )
+                        write_json(
+                            metrics_path,
                             {
                                 "patient": case["patient"],
+                                "lesion": case["lesion"],
                                 "seed": seed,
                                 "gain": gain,
-                                "status": "started",
-                            }
-                        )
-                        + "\n"
-                    )
-                output = root / "runs" / case["lesion"] / f"seed-{seed}" / f"gain-{gain}"
-                comparison_path = output / "reference_comparison.json"
-                if not comparison_path.exists():
-                    sample_reference(
-                        profile,
-                        host,
-                        controls,
-                        weights=Path(cast(str, plan["weights"])),
-                        output_dir=output,
-                        seed=seed,
-                        adapter=Path(cast(str, plan["adapter"])),
-                        adapter_gain=gain,
-                    )
-                arguments = cast(
-                    dict[str, object], json.loads((output / "arguments.json").read_text())
-                )
-                if arguments["seed"] != seed or arguments["controls"] != asdict(controls):
-                    raise ValueError("Cached draw has different controls or seed")
-                expected_paths = {
-                    "image_path": str(Path(case["clean_ct"]).resolve()),
-                    "organ_mask_path": str(Path(case["liver_mask"]).resolve()),
-                    "lesion_mask_path": str(Path(case["placed_mask"]).resolve()),
-                    "weights_path": str(Path(cast(str, plan["weights"])).resolve()),
-                }
-                if any(arguments.get(key) != value for key, value in expected_paths.items()):
-                    raise ValueError("Cached draw has different image, mask or base weights")
-                learned = arguments.get("learned_adapter")
-                if not isinstance(learned, dict):
-                    raise ValueError("Cached draw lacks learned adapter metadata")
-                learned_fields = cast(dict[str, object], learned)
-                cached_gain = learned_fields.get("gain")
-                if (
-                    isinstance(cached_gain, bool)
-                    or not isinstance(cached_gain, int | float)
-                    or cached_gain != gain
-                    or learned_fields.get("checkpoint")
-                    != str(Path(cast(str, plan["adapter"])).resolve())
-                ):
-                    raise ValueError("Cached draw has a different adapter checkpoint or gain")
-                desired_mean_hu = profile.target_mean_hu + (
-                    host.ring_mean_hu if profile.target_space == "liver_contrast" else 0.0
-                )
-                if (
-                    arguments.get("conditioning_mean_hu") != desired_mean_hu
-                    or arguments.get("target_mean_hu") != desired_mean_hu + controls.numeric_offset
-                ):
-                    raise ValueError("Cached draw has a different numeric HU condition")
-                previous_profile = load_profile(output / "reference_profile.json")
-                if (
-                    previous_profile.features != profile.features
-                    or previous_profile.target_space != profile.target_space
-                ):
-                    raise ValueError("Cached draw used another reference target")
-                validation = cast(
-                    dict[str, object], json.loads((output / "validation.json").read_text())
-                )
-                if validation["valid"] is not True or validation["actual_steps"] != 25:
-                    raise ValueError("Generated draw did not qualify")
-                result = cast(dict[str, object], json.loads((output / "result.json").read_text()))
-                outputs = cast(dict[str, str], result["outputs"])
-                aligned_path = output / "mean_aligned_comparison.json"
-                metrics_path = output / "reliability_metrics.json"
-                if not aligned_path.exists() or not metrics_path.exists():
-                    image = np.asarray(
-                        nib.Nifti1Image.from_filename(outputs["synthetic_image"]).dataobj,
-                        dtype=np.float32,
-                    )
-                    relative = image - np.float32(host.ring_mean_hu)
-                    actual_mean = float(np.mean(relative[host.placement_mask], dtype=np.float64))
-                    shift = profile.target_mean_hu - actual_mean
-                    aligned = relative + np.float32(shift)
-                    aligned_features = extract_features(
-                        aligned, host.placement_mask, profile.settings
-                    )
-                    comparison = compare_features(profile, aligned_features)
-                    write_json(
-                        aligned_path,
-                        {
-                            **comparison,
-                            "diagnostic": {
-                                "uniform_shift_hu": shift,
-                                "synthetic_image_unchanged": True,
-                                "purpose": (
-                                    "Attenuation/bin-origin sensitivity; "
-                                    "not pure spatial-texture isolation"
-                                ),
+                                "target_contrast_hu": profile.target_mean_hu,
+                                "fixed_generated_contrast_hu": deviations[
+                                    "original_firstorder_Mean"
+                                ]["generated"],
+                                "actual_generated_contrast_hu": float(
+                                    np.mean(image[host.placement_mask], dtype=np.float64)
+                                )
+                                - generated_ring,
+                                "generated_ring_shift_hu": generated_ring - host.ring_mean_hu,
+                                "mean_alignment_shift_hu": shift,
                             },
-                        },
-                    )
-                    generated_ring = float(np.mean(image[host.ring_mask], dtype=np.float64))
-                    original_comparison = cast(
-                        dict[str, object], json.loads(comparison_path.read_text())
-                    )
-                    deviations = cast(
-                        dict[str, dict[str, float]], original_comparison["deviations"]
-                    )
-                    write_json(
-                        metrics_path,
+                        )
+                    pair.append(
                         {
                             "patient": case["patient"],
                             "lesion": case["lesion"],
+                            "cohort": case["cohort"],
                             "seed": seed,
                             "gain": gain,
-                            "target_contrast_hu": profile.target_mean_hu,
-                            "fixed_generated_contrast_hu": deviations["original_firstorder_Mean"][
-                                "generated"
-                            ],
-                            "actual_generated_contrast_hu": float(
-                                np.mean(image[host.placement_mask], dtype=np.float64)
+                            "comparison_path": str(comparison_path),
+                            "mean_aligned_comparison_path": str(aligned_path),
+                            "metrics_path": str(metrics_path),
+                            "output_dir": str(output),
+                        }
+                    )
+                    with (root / "attempts.jsonl").open("a") as stream:
+                        stream.write(
+                            json.dumps(
+                                {
+                                    "patient": case["patient"],
+                                    "seed": seed,
+                                    "gain": gain,
+                                    "status": "completed",
+                                }
                             )
-                            - generated_ring,
-                            "generated_ring_shift_hu": generated_ring - host.ring_mean_hu,
-                            "mean_alignment_shift_hu": shift,
-                        },
-                    )
-                pair.append(
-                    {
-                        "patient": case["patient"],
-                        "lesion": case["lesion"],
-                        "cohort": case["cohort"],
-                        "seed": seed,
-                        "gain": gain,
-                        "comparison_path": str(comparison_path),
-                        "mean_aligned_comparison_path": str(aligned_path),
-                        "metrics_path": str(metrics_path),
-                        "output_dir": str(output),
-                    }
-                )
-                with (root / "attempts.jsonl").open("a") as stream:
-                    stream.write(
-                        json.dumps(
-                            {
-                                "patient": case["patient"],
-                                "seed": seed,
-                                "gain": gain,
-                                "status": "completed",
-                            }
+                            + "\n"
                         )
-                        + "\n"
-                    )
-            draws.extend(pair)
-            write_json(
-                root / "index.json",
-                {
-                    "schema": "lesioncontrol.reliability_runs.v1",
-                    "cases": cases,
-                    "seeds": seeds,
-                    "draws": draws,
-                },
-            )
-            print(
-                f"PAIRED {case['patient']} seed{seed}; {len(draws)}/{plan['expected_draws']} draws",
-                flush=True,
-            )
+                draws.extend(pair)
+                write_json(
+                    root / "index.json",
+                    {
+                        "schema": "lesioncontrol.reliability_runs.v1",
+                        "cases": cases,
+                        "seeds": seeds,
+                        "draws": draws,
+                    },
+                )
+                print(
+                    f"PAIRED {case['patient']} seed{seed}; "
+                    f"{len(draws)}/{plan['expected_draws']} draws",
+                    flush=True,
+                )
     if len(draws) != plan["expected_draws"]:
         raise ValueError("Reliability campaign has incomplete pairs")
     write_json(

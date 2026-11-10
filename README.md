@@ -95,6 +95,15 @@ own copy, pass a folder containing `model.safetensors` and `tokenizer.json` as
 | `output_region` | `"full"` (default), `"box"` or `"lesion"`; see below |
 | `weights_path` | Optional folder containing `model.safetensors` and `tokenizer.json` |
 | `overwrite` | `False` by default; existing outputs are never replaced |
+| `prepared` | Optional `PreparedGeneration` session for repeated draws with the same CT and supplied lesion mask |
+
+For repeated seeds or phenotype controls on one supplied lesion outline, use
+`with PreparedGeneration() as prepared:` from `lesiondiffusion_mlx.medmlx` and pass
+`prepared=prepared` to each `run` call. The session retains validated geometry,
+the pristine encoded latent and the unmodified reconstruction for lesion output.
+Each draw builds fresh text conditioning and sampler state. Input files, weights,
+preprocessing mode, decoder mode and output region must stay fixed; the context
+manager releases the cached arrays when the host is finished.
 
 To keep 200-step mask generation and use 50-step CT inpainting, pass
 `lmnet_diffusion_steps=200, linet_diffusion_steps=50`. Changing the inpainting

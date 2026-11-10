@@ -21,7 +21,7 @@ from functools import partial
 from os import PathLike
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING, Final, Literal, NotRequired, TypedDict, cast
+from typing import TYPE_CHECKING, Final, Literal, NotRequired, Self, TypedDict, cast
 
 import numpy as np
 from medmlx_core.errors import (
@@ -39,6 +39,7 @@ from lesiondiffusion_mlx._nifti import ImageFileError, NiftiImage, nib
 from lesiondiffusion_mlx._reference import REFERENCE as _REFERENCE
 from lesiondiffusion_mlx._scaled_vq import ScaledVqDecoder
 from lesiondiffusion_mlx._schedules import dpm_solver_timesteps, is_integer
+from lesiondiffusion_mlx._spatial import resize_nearest
 from lesiondiffusion_mlx._typing import ArrayConstructor
 
 if TYPE_CHECKING:
@@ -378,6 +379,77 @@ class _Geometry:
     lesion_mask: BoolArray | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedIdentity:
+    """Process-local input/model identity without reading or digesting file contents."""
+
+    files: tuple[tuple[str, int, int, int, int, int], ...]
+    organ: str
+    inference_mode: str
+    decoder_mode: str
+    output_region: str
+
+
+@dataclass(slots=True)
+class _PreparedState:
+    """One host's bounded in-memory preparation, released with its session."""
+
+    geometry: _Geometry | None = None
+    latent: Array | None = None
+    reconstruction: FloatArray | None = None
+
+
+class PreparedGeneration:
+    """Bounded cache for repeated draws on one CT and supplied lesion outline.
+
+    Pass the session to ``run(prepared=...)`` inside a ``with`` block. The first
+    draw retains validated geometry, a pristine evaluated latent and, for lesion
+    output, the unmodified reconstruction. Later draws reuse them while rebuilding
+    text conditioning, sampler history and seed state. Changing an input/model
+    file, organ, preprocessing mode, decoder or output region requires a new
+    session. ``close`` releases its host arrays and native latent.
+    """
+
+    def __init__(self) -> None:
+        self._identity: _PreparedIdentity | None = None
+        self.state = _PreparedState()
+        self._closed = False
+
+    def __enter__(self) -> Self:
+        if self._closed:
+            raise InvalidInputError("PreparedGeneration is closed")
+        return self
+
+    def __exit__(self, *_exception: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Release this host's retained preparation and prevent further draws."""
+        self.state = _PreparedState()
+        self._identity = None
+        self._closed = True
+
+    def bind(self, files: Sequence[Path], options: LesionDiffusionOptions) -> None:
+        """Reject changed files/settings before any cached data can be reused."""
+        if self._closed:
+            raise InvalidInputError("PreparedGeneration is closed")
+        records: list[tuple[str, int, int, int, int, int]] = []
+        for path in files:
+            resolved = path.resolve()
+            stat = resolved.stat()
+            records.append((
+                str(resolved), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns,
+                stat.st_dev, stat.st_ino,
+            ))
+        identity = _PreparedIdentity(
+            tuple(records), options.organ, options.inference_mode,
+            options.decoder_mode, options.output_region,
+        )
+        if self._identity is not None and self._identity != identity:
+            raise InvalidInputError("PreparedGeneration inputs, weights or execution modes changed")
+        self._identity = identity
+
+
 def run(
     *,
     image_path: _PathArg,
@@ -407,6 +479,7 @@ def run(
     inference_mode: str = DEFAULT_INFERENCE_MODE,
     output_region: str = DEFAULT_OUTPUT_REGION,
     overwrite: bool = False,
+    prepared: PreparedGeneration | None = None,
 ) -> RunResult:
     """Insert one synthetic lesion into a CT and write NIfTI outputs.
 
@@ -503,6 +576,8 @@ def run(
         overwrite: Replace existing output files instead of refusing. A failure before
             the final file moves leaves no new outputs; a failure during those moves
             can leave partial outputs that require ``overwrite`` for a retry.
+        prepared: Optional bounded session for repeated seeds or text controls with
+            the same CT, organ mask and supplied lesion mask. Use as a context manager.
 
     Returns:
         ``{"outputs": ..., "details": ...}``. ``synthetic_image`` is float32 HU;
@@ -557,17 +632,25 @@ def run(
         )
     folder = weights_dir(MODEL_ID) if weights_path is None else weights_path
     directory = require_weights(folder, inference_mode=options.inference_mode)
+    if prepared is not None:
+        if lesion_path is None:
+            raise InvalidInputError("PreparedGeneration requires a supplied lesion_mask_path")
+        prepared.bind(
+            (source, supplied_mask, lesion_path, directory / "model.safetensors",
+             directory / TOKENIZER_FILE), options,
+        )
     started_at = datetime.now(UTC)
     started = time.perf_counter()
     try:
-        geometry = prepare_geometry(
-            source=source,
-            supplied_mask=supplied_mask,
-            supplied_anatomy=anatomy_path,
-            supplied_lesion=lesion_path,
-            options=options,
-        )
-        spec, stages = _execute_run(geometry, options, directory, outputs)
+        geometry = prepared.state.geometry if prepared is not None else None
+        if geometry is None:
+            geometry = prepare_geometry(
+                source=source, supplied_mask=supplied_mask, supplied_anatomy=anatomy_path,
+                supplied_lesion=lesion_path, options=options,
+            )
+            if prepared is not None:
+                prepared.state.geometry = geometry
+        spec, stages = _execute_run(geometry, options, directory, outputs, prepared=prepared)
     except MedmlxError:
         raise
     except RuntimeError as exc:
@@ -647,6 +730,7 @@ def _execute_run(
     options: LesionDiffusionOptions,
     directory: Path,
     outputs: dict[str, Path],
+    *, prepared: PreparedGeneration | None = None,
 ) -> tuple[GenerationSpec, dict[str, dict[str, object]]]:
     """Run native generation and write its validated outputs."""
     model_label, _ = source_organ_label(options.organ)
@@ -673,6 +757,7 @@ def _execute_run(
             on_stage_completed=stages.__setitem__,
             anatomy_mask_ras=geometry.anatomy_mask,
             lesion_mask_ras=geometry.lesion_mask,
+            prepared=prepared,
         )
     if cache_limit is not None:
         facts["cache_limit_bytes"] = cache_limit
@@ -784,6 +869,7 @@ def run_native_pipeline(
     on_stage_completed: Callable[[str, dict[str, object]], None],
     anatomy_mask_ras: HostArray | None = None,
     lesion_mask_ras: BoolArray | None = None,
+    prepared: PreparedGeneration | None = None,
 ) -> tuple[HostArray, HostArray | None, HostArray, NativeRuntime]:
     """Run LMNet, then LINet and the VQ decoder, with the released EMA weights.
 
@@ -831,6 +917,8 @@ def run_native_pipeline(
             "LesionDiffusion anatomy context conditions only LMNet, which a supplied "
             "lesion mask skips"
         )
+    if prepared is not None and prepared.state.geometry is None:
+        raise InvalidInputError("Bind PreparedGeneration through the file runner first")
     directory = weights_dir
     tokenizer_path = directory / TOKENIZER_FILE
     if options.decoder_mode == "scaled_fp16" and not nax_available(mx):
@@ -857,7 +945,7 @@ def run_native_pipeline(
     on_stage_completed("lmnet", lm_stage)
     lin_attributes = _linet_attributes(attributes, options)
     generated_ras, reconstruction_ras, lin_stage = _run_linet(
-        image, lesion, options, lin_attributes, directory, tokenizer_path, mx
+        image, lesion, options, lin_attributes, directory, tokenizer_path, mx, prepared=prepared,
     )
     on_stage_completed("linet", lin_stage)
     lesion_ras = source_to_ras(np.where(lesion, 2, organ.astype(np.uint8)))
@@ -1058,6 +1146,7 @@ def _run_linet(
     directory: Path,
     tokenizer_path: Path,
     mx: Mlx,
+    *, prepared: PreparedGeneration | None = None,
 ) -> tuple[HostArray, HostArray | None, dict[str, object]]:
     """Generate the lesion image using the selected mask and attributes.
 
@@ -1068,22 +1157,40 @@ def _run_linet(
     """
     lin_started = time.perf_counter()
     source_arithmetic = options.inference_mode == "source"
-    # Keep idle LINet weights out of the full-resolution encoder live set.
-    vq = VqAutoencoder(
-        load_stage(directory, "vq", mx, dtype=mx.float16),
-        mx,
-        source_arithmetic=source_arithmetic,
+    encoder_reused = prepared is not None and prepared.state.latent is not None
+    if prepared is not None and prepared.state.latent is not None:
+        # A new MLX array descriptor keeps slice assignment local to this draw.
+        latent = cast(ArrayConstructor, mx.array)(prepared.state.latent)
+        load_elapsed = encode_elapsed = 0.0
+        nax_convolutions = 0
+    else:
+        vq = VqAutoencoder(
+            load_stage(directory, "vq", mx, dtype=mx.float16, prefixes=("encoder.", "quant_conv.")),
+            mx, source_arithmetic=source_arithmetic,
+        )
+        mx.eval(*vq.weights.values())
+        load_elapsed = time.perf_counter() - lin_started
+        encode_started = time.perf_counter()
+        native_image = piecewise_ct(cast(ArrayConstructor, mx.array)(image[None, None]), mx).astype(
+            mx.float16
+        )
+        latent = encode_source(vq, native_image, mx)
+        if not bool(mx.all(mx.isfinite(latent)).item()):
+            raise ModelExecutionError("Native VQ encoder produced non-finite latents")
+        mx.eval(latent)
+        if prepared is not None:
+            prepared.state.latent = cast(ArrayConstructor, mx.array)(latent)
+        encode_elapsed = time.perf_counter() - encode_started
+        nax_convolutions = len(vq.nax_weights)
+        del vq, native_image
+    # Nearest-neighbour resize uses the same source index mapping as the VQ helper.
+    mask = resize_nearest(
+        cast(ArrayConstructor, mx.array)(lesion[None, None], dtype=mx.float16),
+        tuple(int(value) for value in latent.shape[2:]),
+        mx=mx,
     )
-    mx.eval(*vq.weights.values())
-    load_elapsed = time.perf_counter() - lin_started
-    encode_started = time.perf_counter()
-    native_image = piecewise_ct(cast(ArrayConstructor, mx.array)(image[None, None]), mx).astype(
-        mx.float16
-    )
-    latent = encode_source(vq, native_image, mx)
-    if not bool(mx.all(mx.isfinite(latent)).item()):
-        raise ModelExecutionError("Native VQ encoder produced non-finite latents")
-    encode_elapsed = time.perf_counter() - encode_started
+    mask = (mask > 0.5).astype(mx.float16)
+    mx.eval(mask)
     load_started = time.perf_counter()
     linet = LdmUnet(
         load_stage(directory, "linet", mx, dtype=mx.float16),
@@ -1100,13 +1207,7 @@ def _run_linet(
     # Force the lazy weight loads here so load_and_condition_s measures them.
     mx.eval(*linet.weights.values())
     load_elapsed += time.perf_counter() - load_started
-    nax_convolutions = len(linet.nax_weights) + len(vq.nax_weights)
-    # Lesion mask on the latent grid: nearest-neighbour resize, then binarize.
-    mask = vq.resize_nearest(
-        cast(ArrayConstructor, mx.array)(lesion[None, None], dtype=mx.float16),
-        tuple(int(value) for value in latent.shape[2:]),
-    )
-    mask = (mask > 0.5).astype(mx.float16)
+    nax_convolutions += len(linet.nax_weights)
     selection = (slice(None), slice(None), *_linet_latent_window(lesion))
     diffusion_steps = (
         options.diffusion_steps
@@ -1132,8 +1233,9 @@ def _run_linet(
     if not bool(mx.all(mx.isfinite(latent)).item()):
         raise ModelExecutionError("Native LINet produced non-finite latents before quantization")
     sampling_elapsed = time.perf_counter() - sampling_started
-    # Free the UNet before decoding; only the VQ autoencoder and latent are still needed.
-    del linet, sample, sampler, generated, native_image, mask, condition
+    # The encoder is already released; discard the UNet and its bound sampler
+    # before creating the quantizer/decoder bundle.
+    del linet, sample, sampler, generated, mask, condition
     gc.collect()
     mx.clear_cache()
     # Decoder loading also waits until the UNet and its compiled binding are released.
@@ -1144,30 +1246,37 @@ def _run_linet(
     # following GroupNorm turns the resulting infinity into NaN.
     decode_dtype = mx.float16 if source_arithmetic else mx.float32
     decoder: VqAutoencoder
-    if source_arithmetic:
-        decoder = vq
-    elif options.decoder_mode == "scaled_fp16":
-        # Only the codebook from this lazy stage load is retained/materialized.
-        # Network weights are shared with the existing FP16 encoder; nearest-code
-        # selection keeps the original FP32 embedding and decode input cast.
-        codebook = load_stage(directory, "vq", mx, dtype=mx.float32)["quantize.embedding.weight"]
-        decoder = ScaledVqDecoder(vq.weights, codebook, mx)
+    decoder_prefixes = ("decoder.", "post_quant_conv.", "quantize.")
+    if not source_arithmetic and options.decoder_mode == "scaled_fp16":
+        codebook = load_stage(
+            directory, "vq", mx, dtype=mx.float32, prefixes=("quantize.",)
+        )["quantize.embedding.weight"]
+        decoder = ScaledVqDecoder(
+            load_stage(directory, "vq", mx, dtype=mx.float16, prefixes=decoder_prefixes),
+            codebook, mx,
+        )
     else:
         decoder = VqAutoencoder(
-            load_stage(directory, "vq", mx, dtype=mx.float32), mx, source_arithmetic=False
+            load_stage(directory, "vq", mx, dtype=decode_dtype, prefixes=decoder_prefixes),
+            mx, source_arithmetic=source_arithmetic,
         )
-    if decoder is not vq:
-        nax_convolutions += len(decoder.nax_weights)
     mx.eval(*decoder.weights.values())
     load_elapsed += time.perf_counter() - load_started
     decode_started = time.perf_counter()
     generated_ras = _decode_ct(decoder, latent, decode_dtype, mx)
     reconstruction_ras: HostArray | None = None
+    reconstruction_reused = prepared is not None and prepared.state.reconstruction is not None
     if options.output_region == "lesion":
-        mx.clear_cache()
-        latent[selection] = input_window
-        reconstruction_ras = _decode_ct(decoder, latent, decode_dtype, mx)
+        if prepared is not None and prepared.state.reconstruction is not None:
+            reconstruction_ras = prepared.state.reconstruction.copy()
+        else:
+            mx.clear_cache()
+            latent[selection] = input_window
+            reconstruction_ras = _decode_ct(decoder, latent, decode_dtype, mx)
+            if prepared is not None:
+                prepared.state.reconstruction = reconstruction_ras.copy()
     decode_elapsed = time.perf_counter() - decode_started
+    nax_convolutions += len(decoder.nax_weights)
     lin_stage: dict[str, object] = {
         "status": "completed",
         "device": str(mx.default_device()),
@@ -1178,6 +1287,8 @@ def _run_linet(
         "quantization_dtype": "float16" if source_arithmetic else "float32",
         "decoder_mode": options.decoder_mode,
         "input_reconstruction_decoded": reconstruction_ras is not None,
+        "prepared_encoder_reused": encoder_reused,
+        "prepared_reconstruction_reused": reconstruction_reused,
         "crop_shape": list(LINET_CROP),
         "latent_shape": list(latent.shape),
         "output_shape": list(image.shape),
@@ -1352,10 +1463,15 @@ def require_weights(path: _PathArg, *, inference_mode: str = DEFAULT_INFERENCE_M
     return directory
 
 
-def load_stage(directory: Path, name: str, mx: Mlx, *, dtype: Dtype) -> dict[str, Array]:
+def load_stage(
+    directory: Path, name: str, mx: Mlx, *, dtype: Dtype,
+    prefixes: tuple[str, ...] | None = None,
+) -> dict[str, Array]:
     """Load one stage from the native safetensors bundle and cast its arrays.
 
-    Removes the ``<stage>.`` prefix. Conversion receipts are not required.
+    Removes the ``<stage>.`` prefix. When supplied, ``prefixes`` selects component
+    names within that stage before any cast is evaluated or weight is packed.
+    Conversion receipts are not required.
     """
     loaded = mx.load(str(directory / "model.safetensors"), format="safetensors")
     prefix = name + "."
@@ -1363,6 +1479,7 @@ def load_stage(directory: Path, name: str, mx: Mlx, *, dtype: Dtype) -> dict[str
         key.removeprefix(prefix): value.astype(dtype)
         for key, value in loaded.items()
         if key.startswith(prefix)
+        and (prefixes is None or key.removeprefix(prefix).startswith(prefixes))
     }
 
 

@@ -491,6 +491,75 @@ def test_native_generation_is_finite_and_repeats_its_seed(
     assert np.any(first["target_mask"])
 
 
+@pytest.mark.parametrize(
+    "inference_mode,decoder_mode",
+    [("source", "reference"), ("conditioned", "reference"), ("conditioned", "scaled_fp16")],
+)
+def test_prepared_draws_preserve_independent_outputs_and_rng(
+    inference_mode: str,
+    decoder_mode: str,
+    scan: tuple[Path, Path],
+    tiny_weights: Path,
+    conditioned_weights: Path,
+    tiny_networks: None,
+    tmp_path: Path,
+    mx: Mlx,
+) -> None:
+    """Repeated host preparation keeps pristine state, fresh conditions and RNG progression."""
+    if decoder_mode == "scaled_fp16" and not nax_available(mx):
+        pytest.skip("Scaled FP16 decoder requires NAX")
+    lesion = np.zeros(cases.CT_SHAPE, dtype=np.uint8)
+    lesion[9:13, 9:13, 7:11] = 1
+    lesion_path = tmp_path / "lesion.nii.gz"
+    nib.save(nib.Nifti1Image(lesion, nib.load(scan[0]).affine), lesion_path)
+    arguments = _arguments(
+        scan,
+        tmp_path / "unused",
+        tiny_weights if inference_mode == "source" else conditioned_weights,
+        lesion_mask_path=lesion_path,
+        bbox_size_mm=None,
+        output_region="lesion",
+        inference_mode=inference_mode,
+        decoder_mode=decoder_mode,
+        diffusion_steps=2,
+        sampler="ddim" if inference_mode == "source" else "dpmpp_2m",
+    )
+    with medmlx.PreparedGeneration() as prepared:
+        for index, (seed, density) in enumerate(
+            ((11, "hypodense lesion"), (19, "hyperdense lesion"))
+        ):
+            results: list[medmlx.RunResult] = []
+            random: list[NumericArray] = []
+            for cache in (None, prepared):
+                request = {
+                    **arguments,
+                    "seed": seed,
+                    "density": density,
+                    "output_dir": tmp_path / f"draw-{index}-{cache is not None}",
+                    "prepared": cache,
+                }
+                result = run(**cast(cases.RunArguments, request))
+                results.append(result)
+                random.append(cast(NumericArray, np.array(mx.random.normal((17,)))))
+            np.testing.assert_array_equal(random[0], random[1])
+            for role, path in results[0]["outputs"].items():
+                np.testing.assert_array_equal(
+                    np.asanyarray(nib.load(path).dataobj),
+                    np.asanyarray(nib.load(results[1]["outputs"][role]).dataobj),
+                )
+            stage = results[1]["details"]["stages"]["linet"]
+            assert stage["prepared_encoder_reused"] is (index > 0)
+            assert stage["prepared_reconstruction_reused"] is (index > 0)
+        # A new valid file path cannot silently reuse another host's preparation.
+        replacement = tmp_path / "replacement.nii.gz"
+        shutil.copyfile(scan[0], replacement)
+        changed = {**arguments, "image_path": replacement, "prepared": prepared}
+        with pytest.raises(InvalidInputError, match="PreparedGeneration inputs"):
+            run(**cast(cases.RunArguments, changed))
+    with pytest.raises(InvalidInputError, match="closed"):
+        run(**cast(cases.RunArguments, {**arguments, "prepared": prepared}))
+
+
 @pytest.mark.parametrize("decoder_mode", ["reference", "scaled_fp16"])
 def test_dpm_solver_runs_both_conditioned_stages_with_exact_call_counts(
     scan: tuple[Path, Path],
