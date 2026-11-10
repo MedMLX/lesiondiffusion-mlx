@@ -399,6 +399,65 @@ def test_run_matches_upstream_end_to_end(
     assert np.array_equal(np.asanyarray(images["organ_mask"].dataobj), cases.organ_block())
 
 
+@pytest.mark.parametrize("preexisting", ["none", "files", "symlink"])
+def test_output_publication_restores_all_roles_after_move_failure(
+    scan: tuple[Path, Path],
+    tiny_networks: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    preexisting: str,
+) -> None:
+    """A failed final move leaves neither partial new files nor mixed old and new files."""
+    options = medmlx.LesionDiffusionOptions(
+        organ="liver",
+        lesion_type="tumor",
+        bbox_size_mm=BBOX_MM,
+        placement="inside_parenchyma",
+        diffusion_steps=10,
+        seed=4,
+        inference_mode="source",
+    )
+    geometry = medmlx.prepare_geometry(source=scan[0], supplied_mask=scan[1], options=options)
+    image = np.zeros(geometry.reference.shape, dtype=np.float32)
+    lesion = np.zeros(geometry.reference.shape, dtype=np.uint8)
+    lesion[tuple(size // 2 for size in geometry.output_reference.shape)] = 2
+    outputs = medmlx.output_paths(tmp_path / "out")
+    old = {role: f"old {role}".encode() for role in outputs}
+    if preexisting != "none":
+        for role, path in outputs.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(old[role])
+    victim = tmp_path / "victim.nii.gz"
+    if preexisting == "symlink":
+        victim.write_bytes(b"outside")
+        outputs["synthetic_image"].unlink()
+        outputs["synthetic_image"].symlink_to(victim)
+
+    replace = Path.replace
+
+    def fail_second_move(source: Path, destination: Path) -> Path:
+        if destination == outputs["target_mask"] and source.parent.name.startswith(
+            ".lesiondiffusion-"
+        ):
+            raise OSError("injected final move failure")
+        return replace(source, destination)
+
+    monkeypatch.setattr(Path, "replace", fail_second_move)
+    with pytest.raises(OSError, match="injected final move failure"):
+        medmlx.materialize_arrays(
+            outputs=outputs, geometry=geometry, image_data=image, lesion_data=lesion
+        )
+
+    for role, path in outputs.items():
+        if preexisting == "symlink" and role == "synthetic_image":
+            assert path.is_symlink() and path.resolve() == victim
+            assert victim.read_bytes() == b"outside"
+        elif preexisting != "none":
+            assert path.read_bytes() == old[role]
+        else:
+            assert not path.exists()
+
+
 def test_native_generation_is_finite_and_repeats_its_seed(
     scan: tuple[Path, Path], conditioned_weights: Path, tiny_networks: None, tmp_path: Path, mx: Mlx
 ) -> None:
