@@ -11,8 +11,6 @@ Add synthetic lesions to CT with native MLX, with controls for organ, size, plac
 [![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97_Hugging_Face-weights-yellow)](https://huggingface.co/MedMLX/lesiondiffusion-mlx)
 [![MedMLX](https://img.shields.io/badge/MedMLX-runtime-A51C30)](https://github.com/MedMLX/medmlx)
 
-[Model weights](https://huggingface.co/MedMLX/lesiondiffusion-mlx) · [MedMLX](https://github.com/MedMLX/medmlx)
-
 <img src="https://raw.githubusercontent.com/MedMLX/lesiondiffusion-mlx/main/docs/showcase.png" alt="Liver, kidney, lung and bladder CT with the target site boxed, and a close-up of each generated lesion" width="100%">
 
 <sub>Source CT from [KiTS23](https://kits-challenge.org/kits23/), CC BY-NC-SA 4.0, and [LUNA16](https://zenodo.org/records/3723295), CC BY 4.0.</sub>
