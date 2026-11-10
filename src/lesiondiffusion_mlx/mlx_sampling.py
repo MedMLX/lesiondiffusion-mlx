@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
+from lesiondiffusion_mlx._dpm import Dpmpp2mSampler as Dpmpp2mSampler
 from lesiondiffusion_mlx._typing import ArrayConstructor
 
 if TYPE_CHECKING:
@@ -133,3 +134,67 @@ class DdimSampler:
         if mask is not None:
             x = x * mask + (1 - mask) * conditioning_image
         return x
+
+    def prepare(
+        self,
+        denoiser: Callable[[Array, Array], Array],
+        conditioning_image: Array,
+        *,
+        mask: Array | None = None,
+    ) -> Callable[[], Array]:
+        """Compile a complete DDIM step for a fixed, context-bound denoiser.
+
+        The returned sampler reuses evaluated timestep/coefficient tensors and
+        the compiled graph across attempts. It draws the same initial noise and
+        one noise tensor per step as ``__call__``; randomness stays outside the
+        compiled graph. The denoiser must be deterministic and its weights,
+        conditioning image and mask must remain fixed for this binding.
+
+        Each step is evaluated before the next to bound activation lifetimes.
+        Source reproduction continues to use ``__call__`` and its unfused
+        pointwise arithmetic.
+        """
+        mx = self.mx
+        shape = (
+            (conditioning_image.shape[0], 1, *conditioning_image.shape[2:])
+            if mask is None
+            else conditioning_image.shape
+        )
+        timesteps = tuple(
+            mx.full((shape[0],), step, dtype=mx.int32) for step in reversed(self.timesteps)
+        )
+        coefficients = tuple(
+            mx.stack([self.alphas[i], self.previous[i], self.sigmas[i], self.sqrt_one_minus[i]])
+            for i in reversed(range(len(self.timesteps)))
+        )
+        mx.eval(*timesteps, *coefficients)
+
+        def step(x: Array, timestep: Array, coefficient: Array, noise: Array) -> Array:
+            """Build the network input and update one stochastic DDIM sample."""
+            if mask is not None:
+                x = x * mask + (1 - mask) * conditioning_image
+                network_input = mx.concatenate([x, mask], axis=1)
+            else:
+                network_input = mx.concatenate([x, conditioning_image], axis=1)
+            eps = denoiser(network_input, timestep)
+            if mask is not None:
+                eps = eps[:, : conditioning_image.shape[1]]
+            alpha, previous, sigma, sqrt_one_minus = (coefficient[i] for i in range(4))
+            predicted = (x - sqrt_one_minus * eps) / mx.sqrt(alpha)
+            direction = mx.sqrt(1 - previous - sigma**2) * eps
+            return mx.sqrt(previous) * predicted + direction + sigma * noise
+
+        advance = mx.compile(step)
+
+        def sample() -> Array:
+            """Draw one trajectory from the current MLX random stream."""
+            x = mx.random.normal(shape)
+            for timestep, coefficient in zip(timesteps, coefficients, strict=True):
+                noise = mx.random.normal(shape)
+                x = advance(x, timestep, coefficient, noise)
+                mx.eval(x)
+            if mask is not None:
+                x = x * mask + (1 - mask) * conditioning_image
+            return x
+
+        return sample

@@ -1,0 +1,8 @@
+{
+  "include": ["train_cuda_adapter.py", "typings"],
+  "stubPath": "typings",
+  "pythonVersion": "3.13",
+  "typeCheckingMode": "strict",
+  "enableTypeIgnoreComments": false,
+  "reportUnnecessaryTypeIgnoreComment": "error"
+}

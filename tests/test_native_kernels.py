@@ -110,6 +110,36 @@ def _skip_without_nax(mx: Mlx) -> None:
         pytest.skip("NAX convolution needs an M5-class GPU and macOS 26.2")
 
 
+@pytest.mark.parametrize("upsample", [False, True])
+@pytest.mark.parametrize("with_residual", [False, True])
+def test_nax_scales_overflowing_branch_before_store_and_residual(
+    mx: Mlx, upsample: bool, with_residual: bool
+) -> None:
+    """A 75000-valued branch stays finite without scaling its existing residual."""
+    _skip_without_nax(mx)
+    create = cast(ArrayConstructor, mx.array)
+    x = mx.zeros((1, 16, 2, 2, 2), dtype=mx.float16)
+    weight = mx.zeros((1, 16, 3, 3, 3), dtype=mx.float16)
+    # An FP32 convolution accumulator can exceed half range before the store.
+    bias = create([75000.0], dtype=mx.float32)
+    spatial = 4 if upsample else 2
+    shape = (1, 1, spatial, spatial, spatial)
+    residual = mx.full(shape, 8192.0, dtype=mx.float16) if with_residual else None
+    pack = pack_upsample_weight if upsample else pack_weight
+    actual = nax_conv3d(
+        x,
+        pack(weight, mx),
+        bias,
+        upsample=upsample,
+        residual=residual,
+        output_scale=0.25,
+        mx=mx,
+    )
+    mx.eval(actual)
+    expected = np.full(shape, 75000.0 * 0.25 + (8192.0 if with_residual else 0), np.float16)
+    np.testing.assert_array_equal(_host(mx, actual), expected.astype(np.float64))
+
+
 @pytest.mark.parametrize(
     ("shape", "out_channels", "stride"),
     [
@@ -139,7 +169,10 @@ def test_nax_conv_accumulates_in_fp32_and_rounds_once(
 
 
 @pytest.mark.parametrize("split", [False, True])
-def test_nax_conv_adds_batch_bias_and_residual_before_rounding(mx: Mlx, split: bool) -> None:
+@pytest.mark.parametrize("output_scale", [1.0, 0.25])
+def test_nax_conv_adds_batch_bias_and_residual_before_rounding(
+    mx: Mlx, split: bool, output_scale: float
+) -> None:
     """Add batch bias and residual before the final rounding step."""
     _skip_without_nax(mx)
     channels = 512 if split else 32
@@ -148,12 +181,16 @@ def test_nax_conv_adds_batch_bias_and_residual_before_rounding(mx: Mlx, split: b
     create = cast(ArrayConstructor, mx.array)
     bias = create(rng.normal(size=(2, 64)).astype(np.float32))
     residual = create(rng.normal(size=(2, 64, 4, 4, 4)).astype(np.float16))
-    actual = nax_conv3d(x, pack_weight(weight, mx), bias, residual=residual, mx=mx)
+    actual = nax_conv3d(
+        x, pack_weight(weight, mx), bias, residual=residual, output_scale=output_scale, mx=mx
+    )
     mx.eval(actual)
     products, _, magnitude = _reference(mx, x, weight, None, padding=1)
-    expected = products + _host(mx, bias)[:, :, None, None, None] + _host(mx, residual)
+    expected = (products + _host(mx, bias)[:, :, None, None, None]) * output_scale + _host(
+        mx, residual
+    )
     error = np.abs(_host(mx, actual) - expected)
-    assert np.all(error <= _half_spacing(expected) + _ACCUMULATION_EPS * magnitude)
+    assert np.all(error <= _half_spacing(expected) + _ACCUMULATION_EPS * magnitude * output_scale)
 
 
 def test_nax_upsample_conv_matches_conv_of_nearest_upsampling(mx: Mlx) -> None:
@@ -355,10 +392,20 @@ def _attention_reference(
     return result
 
 
-@pytest.mark.parametrize("kernel", ["nax", "simd"])
 @pytest.mark.parametrize(
-    ("batch", "length", "keys", "heads"),
-    [(1, 96, 64, 2), (2, 32, 160, 1), (1, 1056, 96, 2)],  # 1056: partial NAX threadgroup
+    ("kernel", "batch", "length", "keys", "heads"),
+    [
+        (kernel, *shape)
+        for kernel in ("nax", "simd")
+        for shape in ((1, 96, 64, 2), (2, 32, 160, 1), (1, 1056, 96, 2))
+    ]
+    + [
+        ("nax-half", 2, 32, 32, 1),
+        ("nax-half", 1, 96, 96, 2),
+        ("nax-half-ties", 1, 96, 96, 2),
+        ("nax-half", 1, 1056, 1056, 2),  # Partial final 64-query threadgroup.
+        *(("nax-half", 1, 512, 512, heads) for heads in (4, 8, 16)),
+    ],
 )
 def test_flash_attention_matches_float64_softmax(
     mx: Mlx,
@@ -370,7 +417,7 @@ def test_flash_attention_matches_float64_softmax(
     heads: int,
 ) -> None:
     """Compare flash attention with float64 softmax reference values."""
-    if kernel == "nax":
+    if kernel.startswith("nax"):
         _skip_without_nax(mx)
     else:
         monkeypatch.setenv(DISABLE_ENV, "0")
@@ -381,9 +428,23 @@ def test_flash_attention_matches_float64_softmax(
         rng.normal(size=(batch, size, heads * 32)) * scale
         for size, scale in ((length, 2.0), (keys, 2.0), (keys, 1.0))
     )
-    arrays = [create(value.astype(np.float32)) for value in (q, k, v)]
+    is_half = kernel.startswith("nax-half")
+    if kernel == "nax-half-ties":
+        # Equal logits across key tiles must retain the complete softmax sum.
+        q = np.zeros_like(q)
+    if is_half:
+        # The oracle uses the exact half inputs, isolating kernel arithmetic
+        # from the input conversion. The FP32 contract below stays unchanged.
+        q, k, v = (value.astype(np.float16).astype(np.float64) for value in (q, k, v))
+    arrays = [create(value.astype(np.float16 if is_half else np.float32)) for value in (q, k, v)]
     assert flash_eligible(arrays[0], arrays[1], heads, mx)
     actual = flash_attention(*arrays, heads=heads, scale=32**-0.5, mx=mx)
     mx.eval(actual)
     expected = _attention_reference(q, k, v, heads)
-    np.testing.assert_allclose(_host(mx, actual), expected, rtol=0, atol=2e-5)
+    assert actual.dtype == arrays[0].dtype
+    assert np.all(np.isfinite(_host(mx, actual)))
+    # The existing FP16 model-equivalence bound includes probability and
+    # output rounding. FP32 retains its tighter independent-reference bound.
+    np.testing.assert_allclose(
+        _host(mx, actual), expected, rtol=2e-3 if is_half else 0, atol=2e-3 if is_half else 2e-5
+    )

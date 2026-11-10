@@ -37,3 +37,19 @@ def lesion_diffusion_timesteps(steps: int, total: int = 1000) -> tuple[int, ...]
             f"for a {total}-timestep schedule; choose another diffusion_steps value"
         )
     return timesteps
+
+
+def dpm_solver_timesteps(steps: int, total: int = 1000) -> tuple[int, ...]:
+    """Return Diffusers' descending linspace schedule with exactly ``steps`` entries.
+
+    This is the DPM-Solver++ schedule, separate from source DDIM's uniform
+    stride. NumPy rounds host-side timestep metadata with the reference's
+    nearest-even rule. Duplicate timesteps cannot define a multistep interval.
+    """
+    import numpy as np
+
+    if not is_integer(steps) or steps < 1:
+        raise ValueError("DPM-Solver++ steps must be a positive integer")
+    if not is_integer(total) or total < 2 or steps >= total:
+        raise ValueError("DPM-Solver++ steps must be smaller than the training schedule")
+    return tuple(int(value) for value in np.linspace(0, total - 1, steps + 1).round()[::-1][:-1])

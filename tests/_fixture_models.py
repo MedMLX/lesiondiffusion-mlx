@@ -199,6 +199,7 @@ def sampling_inputs(seed: int, *, inpainting: bool) -> dict[str, HostArray]:
 
 def sampling_denoiser(mx: Mlx) -> Callable[[Array, Array, Array | None], Array]:
     """Build a deterministic denoiser for sampling fixtures."""
+
     def denoiser(x: Array, timestep: Array, condition: Array | None) -> Array:
         """Predict deterministic noise from the sample and conditioning."""
         x = x[:, :1] if x.shape[1] == 4 else x

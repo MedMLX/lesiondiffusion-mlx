@@ -88,10 +88,37 @@ own copy, pass a folder containing `model.safetensors` and `tokenizer.json` as
 | `anatomy_mask_path` | Optional 104-label surrounding-organ map that conditions mask generation |
 | `bbox_center_voxel` | Optional `[I, J, K]` box center on the standardized grid; placement is automatic otherwise |
 | `diffusion_steps`, `seed` | Sampling controls; the upstream defaults are 200 and 23 |
+| `lmnet_diffusion_steps`, `linet_diffusion_steps` | Optional stage overrides; each defaults to `diffusion_steps` |
+| `sampler` | `"ddim"` (default) or `"dpmpp_2m"` in conditioned mode |
+| `decoder_mode` | `"reference"` (default) or `"scaled_fp16"` with conditioned mode and enabled NAX |
 | `inference_mode` | `"conditioned"` (default) or `"source"`; see below |
 | `output_region` | `"full"` (default), `"box"` or `"lesion"`; see below |
 | `weights_path` | Optional folder containing `model.safetensors` and `tokenizer.json` |
 | `overwrite` | `False` by default; existing outputs are never replaced |
+
+To keep 200-step mask generation and use 50-step CT inpainting, pass
+`lmnet_diffusion_steps=200, linet_diffusion_steps=50`. Changing the inpainting
+step count changes the generated CT trajectory while retaining the mask for the
+same seed and mask-generation settings. Results record requested and actual
+step counts for each stage.
+
+`sampler="dpmpp_2m"` uses deterministic DPM-Solver++ 2M with exactly the requested
+number of denoiser calls per sampling attempt (1–999). Mask QC can request a
+second attempt. It changes both sampling trajectories.
+The default 200-step DDIM path remains the reference; source mode uses DDIM.
+
+`decoder_mode="scaled_fp16"` keeps FP32 codebook selection and uses half decoder
+weights and scaled half activations. Scaling prevents the known upsampling
+overflow; half rounding changes decoded HU. It requires NAX on an M5-class GPU.
+Native generation in this mode caps MLX's free-buffer cache at 4 GiB, respects
+an existing tighter limit and restores the caller's limit afterward.
+`decoder_mode="reference"` keeps conditioned decoding in FP32. Numerical results
+and measurements are in [the technical notes](docs/technical.md).
+
+[LesionControl](research/lesioncontrol/README.md) adds reference-conditioned
+radiomics profiles, bounded control search and a learned context adapter. Its
+research code includes real-HCC adapter training and paired-seed evaluation;
+it has a separate environment under `research/lesioncontrol`.
 
 The phenotype text arguments `shape`, `density`, `density_variation`, `enhancement`,
 `surface`, `adjacent_relationship` and `specific_features` default to the upstream

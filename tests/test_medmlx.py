@@ -6,16 +6,18 @@ import json
 import os
 import shutil
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, cast
 
 import numpy as np
 import pytest
 import safetensors.numpy as safe_numpy
-from medmlx_core.errors import AssetNotReadyError, InvalidInputError
+from medmlx_core.errors import AssetNotReadyError, InvalidInputError, ModelExecutionError
 
 from lesiondiffusion_mlx import medmlx
 from lesiondiffusion_mlx._arrays import BoolArray, FloatArray, HostArray, NumericArray
+from lesiondiffusion_mlx._nax_conv import nax_available
 from lesiondiffusion_mlx._nifti import nib
 from lesiondiffusion_mlx._typing import ArrayConstructor
 from lesiondiffusion_mlx.medmlx import run
@@ -72,35 +74,47 @@ def test_upstream_threshold_selection() -> None:
     assert np.array_equal(medmlx.select_lesion_component(samples * 0.1, box), fixture["empty"])
 
 
-def test_lesion_output_cancels_reconstruction_offset_and_keeps_distant_input() -> None:
+@pytest.mark.parametrize("reach", [3, 33])
+def test_lesion_output_cancels_reconstruction_offset_and_keeps_distant_input(reach: int) -> None:
     """Lesion output adds only the inpainted change; voxels beyond reach keep the input."""
     rng = np.random.default_rng(7)
-    original = rng.normal(40.0, 15.0, (24, 20, 18)).astype(np.float32)
+    shift = reach - 3
+    shape = tuple(size + 2 * shift for size in (24, 20, 18))
+    original = rng.normal(40.0, 15.0, shape).astype(np.float32)
     # Bone above the decoders' 1000 HU clip, beyond and within the lesion's reach.
-    original[0, 0, 0] = original[8, 6, 5] = 1500.0
+    original[0, 0, 0] = original[8 + shift, 6 + shift, 5 + shift] = 1500.0
     lesion = np.zeros(original.shape, dtype=bool)
-    lesion[10:13, 8:11, 7:10] = True
+    lesion[10 + shift : 13 + shift, 8 + shift : 11 + shift, 7 + shift : 10 + shift] = True
     # The autoencoder shifts every decoded voxel by -9 HU; inpainting darkens the
-    # lesion by 30 HU and its first surrounding shell by 2 HU.
+    # lesion by 30 HU and its first surrounding shell by 2 HU. A global 0.25 HU
+    # decoder change models spatial GroupNorm effects and must be cut off at reach.
     reconstruction = np.clip(original, -1000, 1000) - 9.0
-    generated = reconstruction.copy()
+    generated = reconstruction + np.float32(0.25)
     shell = np.zeros(original.shape, dtype=bool)
-    shell[9:14, 7:12, 6:11] = True
-    generated[shell] -= 2.0
+    shell[9 + shift : 14 + shift, 7 + shift : 12 + shift, 6 + shift : 11 + shift] = True
+    generated[shell] -= 2.25
     generated[lesion] -= 28.0
 
-    localized, facts = medmlx.apply_lesion_change(
+    # The larger case exercises the public default of 33 rather than overriding it.
+    localize = (
+        partial(medmlx.apply_lesion_change, reach_voxels=reach)
+        if reach == 3
+        else medmlx.apply_lesion_change
+    )
+    localized, facts = localize(
         original=original,
         generated=generated,
         reconstruction=reconstruction,
         lesion=lesion,
-        reach_voxels=3,
     )
 
     reached = np.zeros(original.shape, dtype=bool)
-    reached[7:16, 5:14, 4:13] = True
+    reached[7 : 16 + 2 * shift, 5 : 14 + 2 * shift, 4 : 13 + 2 * shift] = True
     np.testing.assert_array_equal(localized[~reached], original[~reached])
-    assert localized[8, 6, 5] == 1500.0
+    assert localized[8 + shift, 6 + shift, 5 + shift] == 1500.25
+    np.testing.assert_array_equal(
+        localized[reached & ~shell], original[reached & ~shell] + np.float32(0.25)
+    )
     np.testing.assert_allclose(localized[lesion], original[lesion] - 30.0, atol=1e-4)
     np.testing.assert_allclose(
         localized[shell & ~lesion], original[shell & ~lesion] - 2.0, atol=1e-4
@@ -234,10 +248,38 @@ def _arguments(
         ({"seed": -3}, None),
         ({"inference_mode": "unknown"}, None),
         ({"overwrite": "yes"}, None),
+        ({"lmnet_diffusion_steps": True}, None),
+        ({"linet_diffusion_steps": 0}, None),
+        ({"lmnet_diffusion_steps": 3}, None),
+        ({"linet_diffusion_steps": 2.5}, None),
+        ({"sampler": "unknown"}, None),
+        ({"decoder_mode": "unknown"}, None),
+        ({"decoder_mode": "scaled_fp16", "inference_mode": "source"}, None),
+        ({"sampler": "dpmpp_2m", "inference_mode": "source"}, None),
+        (
+            {"sampler": "dpmpp_2m", "inference_mode": "conditioned", "diffusion_steps": 1000},
+            None,
+        ),
         ({}, "synthetic_ct.nii.gz"),
         ({}, "dangling:synthetic_ct.nii.gz"),
     ],
-    ids=["path", "range", "choice", "boolean", "output-conflict", "dangling-output"],
+    ids=[
+        "path",
+        "range",
+        "choice",
+        "boolean",
+        "lmnet-boolean-steps",
+        "linet-zero-steps",
+        "lmnet-invalid-schedule",
+        "linet-noninteger-steps",
+        "sampler-choice",
+        "decoder-choice",
+        "source-scaled-decoder",
+        "source-sampler",
+        "dpm-training-schedule-limit",
+        "output-conflict",
+        "dangling-output",
+    ],
 )
 def test_invalid_arguments_fail_before_downloading_weights(
     overrides: dict[str, object],
@@ -402,24 +444,143 @@ def test_run_matches_upstream_end_to_end(
 def test_native_generation_is_finite_and_repeats_its_seed(
     scan: tuple[Path, Path], conditioned_weights: Path, tiny_networks: None, tmp_path: Path, mx: Mlx
 ) -> None:
-    """Run the default conditioned mode natively; the same seed repeats exactly."""
+    """Stage overrides preserve fallback behavior and leave the mask fixed for LINet changes."""
 
-    def generate(name: str) -> dict[str, NumericArray]:
+    def generate(
+        name: str, *, lmnet_steps: int | None = None, linet_steps: int | None = None
+    ) -> tuple[dict[str, NumericArray], medmlx.RunDetails]:
         """Run conditioned generation and read every written role."""
         result = run(
-            **_arguments(scan, tmp_path / name, conditioned_weights, inference_mode="conditioned")
+            **_arguments(
+                scan,
+                tmp_path / name,
+                conditioned_weights,
+                inference_mode="conditioned",
+                lmnet_diffusion_steps=lmnet_steps,
+                linet_diffusion_steps=linet_steps,
+            )
         )
-        return {
+        images = {
             role: cast(NumericArray, np.asanyarray(nib.load(path).dataobj))
             for role, path in result["outputs"].items()
         }
+        return images, result["details"]
 
-    first, again = generate("first"), generate("again")
+    (first, details), (again, explicit_details) = (
+        generate("first"),
+        generate("again", lmnet_steps=10, linet_steps=10),
+    )
     for role, actual in first.items():
         np.testing.assert_array_equal(actual, again[role])
+    for record in (details, explicit_details):
+        assert record["lmnet_diffusion_steps"] == record["linet_diffusion_steps"] == 10
+    shortened, short_details = generate("short-linet", linet_steps=2)
+    np.testing.assert_array_equal(shortened["target_mask"], first["target_mask"])
+    assert short_details["lmnet_diffusion_steps"] == 10
+    assert short_details["linet_diffusion_steps"] == 2
+    runtime = short_details["generation_spec"]["native_runtime"]
+    assert runtime["lmnet_stage"]["diffusion_steps_requested"] == 10
+    assert runtime["lmnet_stage"]["diffusion_steps_actual"] == 10
+    assert runtime["linet_stage"]["diffusion_steps_requested"] == 2
+    assert runtime["linet_stage"]["diffusion_steps_actual"] == 2
     image = first["synthetic_image"]
     assert image.dtype == np.float32 and np.isfinite(image).all()
     assert image.min() >= -1000 and image.max() <= 1000
     assert first["target_mask"].dtype == np.uint8
     assert set(np.unique(first["target_mask"])) <= {0, 1}
     assert np.any(first["target_mask"])
+
+
+@pytest.mark.parametrize("decoder_mode", ["reference", "scaled_fp16"])
+def test_dpm_solver_runs_both_conditioned_stages_with_exact_call_counts(
+    scan: tuple[Path, Path],
+    conditioned_weights: Path,
+    tiny_networks: None,
+    tmp_path: Path,
+    mx: Mlx,
+    decoder_mode: str,
+) -> None:
+    """The explicit alternative reaches both networks and reports its exact schedule."""
+    if decoder_mode == "scaled_fp16" and not nax_available(mx):
+        pytest.skip("Scaled FP16 decoding requires enabled NAX")
+    previous = mx.set_cache_limit(8 << 30)
+    try:
+        result = run(
+            **_arguments(
+                scan,
+                tmp_path / "dpm",
+                conditioned_weights,
+                inference_mode="conditioned",
+                sampler="dpmpp_2m",
+                diffusion_steps=3,  # Invalid for DDIM, valid for the separate DPM schedule.
+                linet_diffusion_steps=2,
+                decoder_mode=decoder_mode,
+            )
+        )
+        assert mx.set_cache_limit(8 << 30) == 8 << 30
+    finally:
+        mx.set_cache_limit(previous)
+    details = result["details"]
+    assert details["sampler"] == "dpmpp_2m"
+    assert details["decoder_mode"] == decoder_mode
+    assert details["lmnet_diffusion_steps"] == 3
+    assert details["linet_diffusion_steps"] == 2
+    runtime = details["generation_spec"]["native_runtime"]
+    if decoder_mode == "scaled_fp16":
+        assert runtime.get("cache_limit_bytes") == 4 << 30
+    else:
+        assert "cache_limit_bytes" not in runtime
+    assert runtime["sampling"] == "dpmpp_2m_linspace_deterministic"
+    assert runtime["lmnet_stage"]["diffusion_steps_actual"] == 3
+    assert runtime["linet_stage"]["diffusion_steps_actual"] == 2
+    assert runtime["linet_stage"]["quantization_dtype"] == "float32"
+    assert runtime["linet_stage"]["decode_dtype"] == (
+        "float16" if decoder_mode == "scaled_fp16" else "float32"
+    )
+    for path in result["outputs"].values():
+        values = cast(NumericArray, np.asanyarray(nib.load(path).dataobj))
+        assert np.isfinite(values).all()
+
+
+@pytest.mark.parametrize("preset_gib", [1, 8])
+def test_scaled_decoder_restores_cache_limit_after_native_failure(
+    scan: tuple[Path, Path],
+    conditioned_weights: Path,
+    tiny_networks: None,
+    tmp_path: Path,
+    mx: Mlx,
+    monkeypatch: pytest.MonkeyPatch,
+    preset_gib: int,
+) -> None:
+    """Failed native work respects a tighter cache limit and restores caller state."""
+    if not nax_available(mx):
+        pytest.skip("Scaled FP16 decoding requires enabled NAX")
+    preset = preset_gib << 30
+    observed: list[int] = []
+
+    def fail_encode(model: VqAutoencoder, array: Array, runtime: Mlx) -> Array:
+        """Observe the active policy at a real model boundary, then inject a failure."""
+        active_limit = runtime.set_cache_limit(preset)
+        runtime.set_cache_limit(active_limit)
+        observed.append(active_limit)
+        raise RuntimeError("injected encoder failure")
+
+    monkeypatch.setattr(medmlx, "encode_source", fail_encode)
+    previous = mx.set_cache_limit(preset)
+    try:
+        with pytest.raises(ModelExecutionError, match="injected encoder failure"):
+            run(
+                **_arguments(
+                    scan,
+                    tmp_path / "failed",
+                    conditioned_weights,
+                    inference_mode="conditioned",
+                    sampler="dpmpp_2m",
+                    diffusion_steps=3,
+                    decoder_mode="scaled_fp16",
+                )
+            )
+        assert observed == [min(preset, 4 << 30)]
+        assert mx.set_cache_limit(preset) == preset
+    finally:
+        mx.set_cache_limit(previous)

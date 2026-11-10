@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "reference": {
+    "distribution": "diffusers",
+    "version": "0.42.1",
+    "commit": "2a1433913c7044f34fa4767dd84b28bba0bb0ecf",
+    "source": "https://github.com/huggingface/diffusers/blob/2a1433913c7044f34fa4767dd84b28bba0bb0ecf/src/diffusers/schedulers/scheduling_dpmsolver_multistep.py"
+  },
+  "torch_version": "2.13.0",
+  "numpy_version": "2.5.4",
+  "recording_platform": "darwin-arm64",
+  "backend": "torch-cpu",
+  "algorithm": "dpmsolver++",
+  "solver_order": 2,
+  "solver_type": "midpoint",
+  "prediction_type": "epsilon",
+  "thresholding": false,
+  "lower_order_final": true,
+  "final_sigmas_type": "zero",
+  "timestep_spacing": "linspace",
+  "state_dtype": "float32",
+  "prediction_boundary": "stored predictions promoted to float32 before scheduler.step",
+  "linet_schedule": "checkpoint cumulative alphas cast to runtime float16, then promoted to float32",
+  "known_region": "clean conditioning latent before every solver step and after final update",
+  "states": "initial noise followed by each unprojected step result; output includes final projection",
+  "cases": [
+    {
+      "name": "lmnet_4",
+      "stage": "lmnet",
+      "steps": 4,
+      "seed": 705,
+      "shape": [
+        1,
+        1,
+        2,
+        3,
+        4
+      ]
+    },
+    {
+      "name": "lmnet_8",
+      "stage": "lmnet",
+      "steps": 8,
+      "seed": 709,
+      "shape": [
+        1,
+        1,
+        2,
+        3,
+        4
+      ]
+    },
+    {
+      "name": "lmnet_25",
+      "stage": "lmnet",
+      "steps": 25,
+      "seed": 726,
+      "shape": [
+        1,
+        1,
+        2,
+        3,
+        4
+      ]
+    },
+    {
+      "name": "linet_4",
+      "stage": "linet",
+      "steps": 4,
+      "seed": 805,
+      "shape": [
+        1,
+        4,
+        2,
+        3,
+        4
+      ]
+    },
+    {
+      "name": "linet_8",
+      "stage": "linet",
+      "steps": 8,
+      "seed": 809,
+      "shape": [
+        1,
+        4,
+        2,
+        3,
+        4
+      ]
+    },
+    {
+      "name": "linet_25",
+      "stage": "linet",
+      "steps": 25,
+      "seed": 826,
+      "shape": [
+        1,
+        4,
+        2,
+        3,
+        4
+      ]
+    }
+  ]
+}

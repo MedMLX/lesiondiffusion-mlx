@@ -13,9 +13,11 @@ from __future__ import annotations
 import gc
 import math
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from functools import partial
 from os import PathLike
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -32,9 +34,11 @@ from medmlx_core.runtime import import_mlx
 from medmlx_core.weights import weights_dir, weights_revision
 
 from lesiondiffusion_mlx._arrays import BoolArray, FloatArray, HostArray, NumericArray
+from lesiondiffusion_mlx._nax_conv import nax_available
 from lesiondiffusion_mlx._nifti import ImageFileError, NiftiImage, nib
 from lesiondiffusion_mlx._reference import REFERENCE as _REFERENCE
-from lesiondiffusion_mlx._schedules import is_integer
+from lesiondiffusion_mlx._scaled_vq import ScaledVqDecoder
+from lesiondiffusion_mlx._schedules import dpm_solver_timesteps, is_integer
 from lesiondiffusion_mlx._typing import ArrayConstructor
 
 if TYPE_CHECKING:
@@ -57,7 +61,11 @@ from lesiondiffusion_mlx.mlx_pipeline import (
     source_crop,
     source_to_ras,
 )
-from lesiondiffusion_mlx.mlx_sampling import DdimSampler, lesion_diffusion_timesteps
+from lesiondiffusion_mlx.mlx_sampling import (
+    DdimSampler,
+    Dpmpp2mSampler,
+    lesion_diffusion_timesteps,
+)
 
 MODEL_ID: Final = "lesiondiffusion"
 DEFAULT_DIFFUSION_STEPS: Final = 200
@@ -75,6 +83,7 @@ LOCALIZATION_MARGIN_MM: Final = 6.0
 # by under 0.05 HU on average in a generated abdomen. ``output_region="lesion"``
 # applies the change within this reach and keeps the input beyond it.
 DECODER_REACH_VOXELS: Final = 33
+_SCALED_CACHE_LIMIT_BYTES: Final = 4 << 30
 SOURCE_REF: Final[str] = _REFERENCE["revision"]
 WEIGHT_STAGES: Final = ("lmnet", "linet", "vq", "lmnet_text", "linet_text")
 SOURCE_INFERENCE_STAGES: Final = tuple(name for name in WEIGHT_STAGES if name != "linet_text")
@@ -130,6 +139,7 @@ class NativeRuntime(TypedDict):
     plain-language statement of what a seed reproduces. ``lesion_mask_source`` is
     ``"lmnet"`` or ``"supplied"``; a supplied mask skips LMNet, so its attempts are 0,
     its conditioning is empty and its stage record has ``status="skipped"``.
+    ``cache_limit_bytes`` records the temporary free-cache cap for scaled decoding.
     """
 
     device: str
@@ -148,6 +158,7 @@ class NativeRuntime(TypedDict):
     sampling: str
     synchronization: str
     seed_contract: str
+    cache_limit_bytes: NotRequired[int]
 
 
 class OutputValidation(TypedDict):
@@ -185,7 +196,11 @@ class GenerationSpec(TypedDict):
 
 
 class RunDetails(TypedDict):
-    """JSON-safe record of one run; ``elapsed_s`` is seconds, ``started_at`` UTC ISO 8601."""
+    """JSON-safe run record with effective requested step counts for each stage.
+
+    ``diffusion_steps`` is the shared fallback. Stage records report the actual
+    schedule length. ``elapsed_s`` is seconds and ``started_at`` UTC ISO 8601.
+    """
 
     model_id: str
     source_ref: str
@@ -193,6 +208,10 @@ class RunDetails(TypedDict):
     lesion_type: str
     seed: int
     diffusion_steps: int
+    lmnet_diffusion_steps: int
+    linet_diffusion_steps: int
+    sampler: str
+    decoder_mode: str
     generation_spec: GenerationSpec
     stages: dict[str, dict[str, object]]
     output_region: str
@@ -236,6 +255,9 @@ class LesionDiffusionOptions:
     text for the upstream report. ``seed`` (0 to 2**32 - 1) seeds MT19937 box placement
     and MLX sampling. ``inference_mode`` is ``"conditioned"`` or ``"source"`` and
     ``output_region`` is ``"full"``, ``"box"`` or ``"lesion"``; see ``run``.
+    Each optional stage step count overrides ``diffusion_steps`` for that stage.
+    ``sampler="ddim"`` retains upstream sampling; ``"dpmpp_2m"`` selects the
+    deterministic alternative in conditioned mode.
 
     Raises:
         InvalidInputError: From construction, for any value outside these contracts.
@@ -257,6 +279,10 @@ class LesionDiffusionOptions:
     seed: int = DEFAULT_SEED
     inference_mode: str = DEFAULT_INFERENCE_MODE
     output_region: str = DEFAULT_OUTPUT_REGION
+    lmnet_diffusion_steps: int | None = None
+    linet_diffusion_steps: int | None = None
+    sampler: str = "ddim"
+    decoder_mode: str = "reference"
 
     def __post_init__(self) -> None:
         """Validate inference, geometry, and lesion-generation options."""
@@ -264,6 +290,14 @@ class LesionDiffusionOptions:
             raise InvalidInputError("LesionDiffusion inference_mode must be conditioned or source")
         if self.output_region not in {"full", "box", "lesion"}:
             raise InvalidInputError("LesionDiffusion output_region must be full, box or lesion")
+        if self.sampler not in {"ddim", "dpmpp_2m"}:
+            raise InvalidInputError("LesionDiffusion sampler must be ddim or dpmpp_2m")
+        if self.inference_mode == "source" and self.sampler != "ddim":
+            raise InvalidInputError("LesionDiffusion source mode requires sampler='ddim'")
+        if self.decoder_mode not in {"reference", "scaled_fp16"}:
+            raise InvalidInputError("LesionDiffusion decoder_mode must be reference or scaled_fp16")
+        if self.inference_mode == "source" and self.decoder_mode != "reference":
+            raise InvalidInputError("LesionDiffusion source mode requires decoder_mode='reference'")
         if self.organ not in SOURCE_ORGAN_LABELS:
             raise InvalidInputError(f"Unknown upstream organ: {self.organ}")
         if not self.lesion_type.strip():
@@ -295,12 +329,22 @@ class LesionDiffusionOptions:
                 raise InvalidInputError("LesionDiffusion bbox_center_voxel values must be integers")
             if any(value < 0 for value in self.bbox_center_voxel):
                 raise InvalidInputError("LesionDiffusion bbox_center_voxel must not be negative")
-        if not is_integer(self.diffusion_steps):
-            raise InvalidInputError("LesionDiffusion diffusion_steps must be an integer")
-        try:
-            lesion_diffusion_timesteps(self.diffusion_steps)
-        except ValueError as exc:
-            raise InvalidInputError(str(exc)) from exc
+        for name, steps in (
+            ("diffusion_steps", self.diffusion_steps),
+            ("lmnet_diffusion_steps", self.lmnet_diffusion_steps),
+            ("linet_diffusion_steps", self.linet_diffusion_steps),
+        ):
+            if steps is None and name != "diffusion_steps":
+                continue
+            if not is_integer(steps):
+                raise InvalidInputError(f"LesionDiffusion {name} must be an integer")
+            try:
+                schedule = (
+                    lesion_diffusion_timesteps if self.sampler == "ddim" else dpm_solver_timesteps
+                )
+                schedule(cast(int, steps))
+            except ValueError as exc:
+                raise InvalidInputError(f"LesionDiffusion {name}: {exc}") from exc
         if not is_integer(self.seed):
             raise InvalidInputError("LesionDiffusion seed must be an integer")
         if self.seed < 0:
@@ -355,6 +399,10 @@ def run(
     specific_features: str = "",
     bbox_center_voxel: Sequence[int] | None = None,
     diffusion_steps: int = DEFAULT_DIFFUSION_STEPS,
+    lmnet_diffusion_steps: int | None = None,
+    linet_diffusion_steps: int | None = None,
+    sampler: str = "ddim",
+    decoder_mode: str = "reference",
     seed: int = DEFAULT_SEED,
     inference_mode: str = DEFAULT_INFERENCE_MODE,
     output_region: str = DEFAULT_OUTPUT_REGION,
@@ -410,13 +458,32 @@ def run(
             upstream report; empty strings are rejected except ``specific_features``.
         bbox_center_voxel: Optional (I, J, K) box center on the standardized grid;
             rejected with ``lesion_mask_path``.
-        diffusion_steps: DDIM steps for both stages; must give a valid upstream
-            uniform schedule (see ``lesion_diffusion_timesteps``).
+        diffusion_steps: Shared step count, used when a stage override is omitted.
+            DDIM requires a valid upstream uniform schedule (see
+            ``lesion_diffusion_timesteps``); DPM-Solver++ uses exactly this many
+            denoiser calls per sampling attempt, from 1 to 999. Mask QC can
+            request a second attempt.
+        lmnet_diffusion_steps: Optional step count for mask generation. A supplied
+            lesion mask still skips this stage.
+        linet_diffusion_steps: Optional step count for CT inpainting. Changing only
+            this count retains LMNet's mask and random draws, and changes LINet's
+            sampling trajectory. Both stage overrides use the same schedule rules.
+        sampler: ``"ddim"`` keeps upstream's stochastic sampler with eta=1.
+            ``"dpmpp_2m"`` selects deterministic DPM-Solver++ 2M for both stages
+            in conditioned mode. It changes the timestep schedule and trajectory;
+            source mode accepts only DDIM.
+        decoder_mode: ``"reference"`` retains FP32 conditioned decoding and source
+            mode's FP16 decoding. ``"scaled_fp16"`` uses half weights and scaled
+            half residual activations with FP32 codebook selection; it requires
+            conditioned mode and enabled NAX. The scale prevents the known
+            post-upsampling overflow, while half rounding changes decoded HU.
+            During native generation it caps MLX's process-wide free cache at
+            4 GiB, respects a tighter caller limit and restores the previous limit.
         seed: Seeds box placement and native MLX sampling. MLX's RNG differs from
             Torch's, so a seed repeats within MLX only.
         inference_mode: ``"conditioned"`` uses native MLX FP16 convolution and the
             trained LINet text path, with resampling at output-affine coordinates, and
-            decodes the VQ latent in FP32. ``"source"`` reproduces upstream's disabled
+            decodes the VQ latent in FP32 by default. ``"source"`` reproduces upstream's disabled
             image text path, Torch CPU reduction order, legacy ``zoom`` resampling
             coordinates and FP16 VQ decoding, which overflows to non-finite values on
             some inputs and then raises ``ModelExecutionError``.
@@ -465,6 +532,10 @@ def run(
         specific_features=specific_features,
         bbox_center_voxel=bbox_center_voxel,
         diffusion_steps=diffusion_steps,
+        lmnet_diffusion_steps=lmnet_diffusion_steps,
+        linet_diffusion_steps=linet_diffusion_steps,
+        sampler=sampler,
+        decoder_mode=decoder_mode,
         seed=seed,
         inference_mode=inference_mode,
         output_region=output_region,
@@ -555,6 +626,22 @@ def _optional_input_path(
     return resolved
 
 
+@contextmanager
+def _decoder_cache_limit(mx: Mlx, decoder_mode: str) -> Generator[int | None]:
+    """Bound free cached buffers for scaled decoding and restore the caller's limit."""
+    if decoder_mode != "scaled_fp16":
+        yield None
+        return
+    previous = mx.set_cache_limit(_SCALED_CACHE_LIMIT_BYTES)
+    try:
+        limit = min(previous, _SCALED_CACHE_LIMIT_BYTES)
+        if limit != _SCALED_CACHE_LIMIT_BYTES:
+            mx.set_cache_limit(limit)
+        yield limit
+    finally:
+        mx.set_cache_limit(previous)
+
+
 def _execute_run(
     geometry: _Geometry,
     options: LesionDiffusionOptions,
@@ -574,18 +661,21 @@ def _execute_run(
     attributes = cast(dict[str, object], cast(list[object], report[str(model_label)])[2])
     mx = cast("Mlx", import_mlx())
     stages: dict[str, dict[str, object]] = {}
-    image, reconstruction, mask, facts = run_native_pipeline(
-        source_ct_ras=geometry.source_data,
-        organ_mask_ras=geometry.organ_mask,
-        bbox_mask_ras=geometry.bbox_mask,
-        options=options,
-        attributes=attributes,
-        weights_dir=directory,
-        mx=mx,
-        on_stage_completed=stages.__setitem__,
-        anatomy_mask_ras=geometry.anatomy_mask,
-        lesion_mask_ras=geometry.lesion_mask,
-    )
+    with _decoder_cache_limit(mx, options.decoder_mode) as cache_limit:
+        image, reconstruction, mask, facts = run_native_pipeline(
+            source_ct_ras=geometry.source_data,
+            organ_mask_ras=geometry.organ_mask,
+            bbox_mask_ras=geometry.bbox_mask,
+            options=options,
+            attributes=attributes,
+            weights_dir=directory,
+            mx=mx,
+            on_stage_completed=stages.__setitem__,
+            anatomy_mask_ras=geometry.anatomy_mask,
+            lesion_mask_ras=geometry.lesion_mask,
+        )
+    if cache_limit is not None:
+        facts["cache_limit_bytes"] = cache_limit
     validation, compositing = materialize_arrays(
         outputs=outputs,
         geometry=geometry,
@@ -633,6 +723,18 @@ def _run_result(
         "lesion_type": options.lesion_type,
         "seed": options.seed,
         "diffusion_steps": options.diffusion_steps,
+        "lmnet_diffusion_steps": (
+            options.diffusion_steps
+            if options.lmnet_diffusion_steps is None
+            else options.lmnet_diffusion_steps
+        ),
+        "linet_diffusion_steps": (
+            options.diffusion_steps
+            if options.linet_diffusion_steps is None
+            else options.linet_diffusion_steps
+        ),
+        "sampler": options.sampler,
+        "decoder_mode": options.decoder_mode,
         "generation_spec": spec,
         "stages": stages,
         "output_region": options.output_region,
@@ -731,6 +833,8 @@ def run_native_pipeline(
         )
     directory = weights_dir
     tokenizer_path = directory / TOKENIZER_FILE
+    if options.decoder_mode == "scaled_fp16" and not nax_available(mx):
+        raise InvalidInputError("LesionDiffusion scaled_fp16 decoding requires enabled NAX")
     mx.random.seed(options.seed)
     image = ras_to_source(source_ct_ras).astype(np.float32)
     organ = ras_to_source(organ_mask_ras).astype(bool)
@@ -763,7 +867,11 @@ def run_native_pipeline(
             "lmnet": "float32",
             "linet": "float16",
             "vq_encoder": "float16",
-            "vq_decoder": "float16" if options.inference_mode == "source" else "float32",
+            "vq_decoder": (
+                "float16"
+                if options.inference_mode == "source" or options.decoder_mode == "scaled_fp16"
+                else "float32"
+            ),
         },
         "inference_mode": options.inference_mode,
         "convolution_arithmetic": (
@@ -784,8 +892,16 @@ def run_native_pipeline(
         "lmnet_stage": lm_stage,
         "linet_stage": lin_stage,
         "model_organ_label": organ_id,
-        "sampling": "source_uniform_ddim_eta_1",
-        "synchronization": "mx.eval_each_ddim_step_and_export",
+        "sampling": (
+            "source_uniform_ddim_eta_1"
+            if options.sampler == "ddim"
+            else "dpmpp_2m_linspace_deterministic"
+        ),
+        "synchronization": (
+            "mx.eval_each_ddim_step_and_export"
+            if options.sampler == "ddim"
+            else "mx.eval_each_solver_step_and_export"
+        ),
         "seed_contract": (
             "MLX native RNG; same seed is reproducible within MLX, not identical to Torch RNG"
         ),
@@ -868,22 +984,35 @@ def _run_lmnet(
     condition = encode_attributes(lm_attributes, text, tokenizer_path, mx)
     # The evaluated condition no longer needs the 0.44 GB FP32 text encoder.
     del text
-    denoiser = mx.compile(lmnet.__call__) if optimized else lmnet.__call__
     # Conditioning channels: anatomy label id / 104 (the upstream label count),
     # target organ, box; shape (1, 3, *LMNET_CROP).
     conditioning = cast(ArrayConstructor, mx.array)(
         np.stack((anatomy[crop].astype(np.float64) / 104.0, organ[crop], bbox[crop]))[None],
         dtype=mx.float32,
     )
-    sampler = DdimSampler(lmnet.weights["alphas_cumprod"], mx, options.diffusion_steps)
+    diffusion_steps = (
+        options.diffusion_steps
+        if options.lmnet_diffusion_steps is None
+        else options.lmnet_diffusion_steps
+    )
+    sampler_class = DdimSampler if options.sampler == "ddim" else Dpmpp2mSampler
+    sampler = sampler_class(lmnet.weights["alphas_cumprod"], mx, diffusion_steps)
+    actual_steps = len(sampler.timesteps)
+    sample = (
+        sampler.prepare(lmnet.prepare_denoiser(condition), conditioning)
+        if optimized
+        else partial(sampler, lmnet.__call__, condition, conditioning)
+    )
+    load_elapsed = time.perf_counter() - lm_started
     lesion = np.zeros(bbox.shape, dtype=bool)
     attempts = 0
     samples: Array | None = None
     # Volume QC: resample once if the selected component is too small (at most 400
     # voxels, 50 for stones); the second attempt is kept either way.
+    sampling_started = time.perf_counter()
     for attempt in range(1, 3):
         attempts = attempt
-        samples = sampler(denoiser, condition, conditioning)
+        samples = sample()
         mx.eval(samples)
         if not bool(mx.all(mx.isfinite(samples)).item()):
             raise ModelExecutionError("Native LMNet produced non-finite samples")
@@ -892,7 +1021,8 @@ def _run_lmnet(
         if int(np.sum(component)) > (50 if "stone" in options.lesion_type else 400):
             break
     # Release LMNet before LINet and the VQ autoencoder load, to bound peak memory.
-    del lmnet, denoiser, condition, conditioning, sampler, samples
+    sampling_elapsed = time.perf_counter() - sampling_started
+    del lmnet, sample, condition, conditioning, sampler, samples
     gc.collect()
     mx.clear_cache()
     if not np.any(lesion):
@@ -904,12 +1034,17 @@ def _run_lmnet(
         "device": str(mx.default_device()),
         "dtype": "float32",
         "crop_shape": list(LMNET_CROP),
-        "diffusion_steps_actual": len(lesion_diffusion_timesteps(options.diffusion_steps)),
+        "diffusion_steps_requested": diffusion_steps,
+        "diffusion_steps_actual": actual_steps,
+        "sampler": options.sampler,
         "attempts": attempts,
         "lesion_voxels": int(np.sum(lesion)),
         "finite": True,
         "attention": "flash_fp32_self_mlx_fused_padded_cross" if optimized else "source_explicit",
         "denoiser_compiled": optimized,
+        "sampler_compiled": optimized,
+        "load_and_condition_s": load_elapsed,
+        "sampling_and_qc_s": sampling_elapsed,
         "synchronized_elapsed_s": time.perf_counter() - lm_started,
     }
     return lesion, lm_stage
@@ -928,43 +1063,18 @@ def _run_linet(
 
     Returns the generated CT and, for ``output_region="lesion"``, the decode of the
     unmodified input latent; both are RAS float32 HU on the input's grid.
+    Load/conditioning time sums the VQ, LINet/text and decoder preparation
+    windows; encoding, sampling and decoding retain separate timing boundaries.
     """
     lin_started = time.perf_counter()
     source_arithmetic = options.inference_mode == "source"
-    linet = LdmUnet(
-        load_stage(directory, "linet", mx, dtype=mx.float16),
-        mx,
-        replace(LINET_CONFIG, skip_context=source_arithmetic),
-        source_arithmetic=source_arithmetic,
-        fused_attention=not source_arithmetic,
-    )
+    # Keep idle LINet weights out of the full-resolution encoder live set.
     vq = VqAutoencoder(
         load_stage(directory, "vq", mx, dtype=mx.float16),
         mx,
         source_arithmetic=source_arithmetic,
     )
-    # Source mode keeps upstream's FP16 decoder. Conditioned mode decodes in FP32
-    # because the activation after the decoder's upsampling convolution can exceed
-    # the FP16 maximum of 65504 (about 7.5e4 on a generated abdomen), and the
-    # following GroupNorm turns the resulting infinity into NaN.
-    decode_dtype = mx.float16 if source_arithmetic else mx.float32
-    decoder = (
-        vq
-        if source_arithmetic
-        else VqAutoencoder(
-            load_stage(directory, "vq", mx, dtype=mx.float32), mx, source_arithmetic=False
-        )
-    )
-    nax_convolutions = len(linet.nax_weights) + len(vq.nax_weights)
-    if decoder is not vq:
-        nax_convolutions += len(decoder.nax_weights)
-    condition: Array | None = None
-    if not source_arithmetic:
-        text = BiomedTextEncoder(load_stage(directory, "linet_text", mx, dtype=mx.float32), mx)
-        condition = encode_attributes(lin_attributes, text, tokenizer_path, mx)
-        del text
-    # Force the lazy weight loads here so load_and_condition_s measures them.
-    mx.eval(*linet.weights.values(), *vq.weights.values(), *decoder.weights.values())
+    mx.eval(*vq.weights.values())
     load_elapsed = time.perf_counter() - lin_started
     encode_started = time.perf_counter()
     native_image = piecewise_ct(cast(ArrayConstructor, mx.array)(image[None, None]), mx).astype(
@@ -974,6 +1084,23 @@ def _run_linet(
     if not bool(mx.all(mx.isfinite(latent)).item()):
         raise ModelExecutionError("Native VQ encoder produced non-finite latents")
     encode_elapsed = time.perf_counter() - encode_started
+    load_started = time.perf_counter()
+    linet = LdmUnet(
+        load_stage(directory, "linet", mx, dtype=mx.float16),
+        mx,
+        replace(LINET_CONFIG, skip_context=source_arithmetic),
+        source_arithmetic=source_arithmetic,
+        fused_attention=not source_arithmetic,
+    )
+    condition: Array | None = None
+    if not source_arithmetic:
+        text = BiomedTextEncoder(load_stage(directory, "linet_text", mx, dtype=mx.float32), mx)
+        condition = encode_attributes(lin_attributes, text, tokenizer_path, mx)
+        del text
+    # Force the lazy weight loads here so load_and_condition_s measures them.
+    mx.eval(*linet.weights.values())
+    load_elapsed += time.perf_counter() - load_started
+    nax_convolutions = len(linet.nax_weights) + len(vq.nax_weights)
     # Lesion mask on the latent grid: nearest-neighbour resize, then binarize.
     mask = vq.resize_nearest(
         cast(ArrayConstructor, mx.array)(lesion[None, None], dtype=mx.float16),
@@ -981,23 +1108,58 @@ def _run_linet(
     )
     mask = (mask > 0.5).astype(mx.float16)
     selection = (slice(None), slice(None), *_linet_latent_window(lesion))
-    sampler = DdimSampler(linet.weights["alphas_cumprod"], mx, options.diffusion_steps)
-    denoiser = linet.__call__ if source_arithmetic else mx.compile(linet.__call__)
+    diffusion_steps = (
+        options.diffusion_steps
+        if options.linet_diffusion_steps is None
+        else options.linet_diffusion_steps
+    )
+    sampler_class = DdimSampler if options.sampler == "ddim" else Dpmpp2mSampler
+    sampler = sampler_class(linet.weights["alphas_cumprod"], mx, diffusion_steps)
+    actual_steps = len(sampler.timesteps)
     mx.eval(mask)
     sampling_started = time.perf_counter()
     # Kept for the input reconstruction; the sampler leaves the rest of the latent as is.
     input_window = latent[selection]
     mx.eval(input_window)
-    generated = sampler(denoiser, condition, input_window, mask=mask[selection])
+    sample = (
+        partial(sampler, linet.__call__, condition, input_window, mask=mask[selection])
+        if source_arithmetic
+        else sampler.prepare(linet.prepare_denoiser(condition), input_window, mask=mask[selection])
+    )
+    generated = sample()
     latent[selection] = generated.astype(mx.float16)
     mx.eval(latent)
     if not bool(mx.all(mx.isfinite(latent)).item()):
         raise ModelExecutionError("Native LINet produced non-finite latents before quantization")
     sampling_elapsed = time.perf_counter() - sampling_started
     # Free the UNet before decoding; only the VQ autoencoder and latent are still needed.
-    del linet, denoiser, sampler, generated, native_image, mask, condition
+    del linet, sample, sampler, generated, native_image, mask, condition
     gc.collect()
     mx.clear_cache()
+    # Decoder loading also waits until the UNet and its compiled binding are released.
+    load_started = time.perf_counter()
+    # Source mode keeps upstream's FP16 decoder. Conditioned reference decodes in FP32
+    # because the activation after the decoder's upsampling convolution can exceed
+    # the FP16 maximum of 65504 (about 7.5e4 on a generated abdomen), and the
+    # following GroupNorm turns the resulting infinity into NaN.
+    decode_dtype = mx.float16 if source_arithmetic else mx.float32
+    decoder: VqAutoencoder
+    if source_arithmetic:
+        decoder = vq
+    elif options.decoder_mode == "scaled_fp16":
+        # Only the codebook from this lazy stage load is retained/materialized.
+        # Network weights are shared with the existing FP16 encoder; nearest-code
+        # selection keeps the original FP32 embedding and decode input cast.
+        codebook = load_stage(directory, "vq", mx, dtype=mx.float32)["quantize.embedding.weight"]
+        decoder = ScaledVqDecoder(vq.weights, codebook, mx)
+    else:
+        decoder = VqAutoencoder(
+            load_stage(directory, "vq", mx, dtype=mx.float32), mx, source_arithmetic=False
+        )
+    if decoder is not vq:
+        nax_convolutions += len(decoder.nax_weights)
+    mx.eval(*decoder.weights.values())
+    load_elapsed += time.perf_counter() - load_started
     decode_started = time.perf_counter()
     generated_ras = _decode_ct(decoder, latent, decode_dtype, mx)
     reconstruction_ras: HostArray | None = None
@@ -1010,15 +1172,29 @@ def _run_linet(
         "status": "completed",
         "device": str(mx.default_device()),
         "dtype": "float16",
-        "decode_dtype": "float16" if source_arithmetic else "float32",
+        "decode_dtype": (
+            "float16" if source_arithmetic or options.decoder_mode == "scaled_fp16" else "float32"
+        ),
+        "quantization_dtype": "float16" if source_arithmetic else "float32",
+        "decoder_mode": options.decoder_mode,
         "input_reconstruction_decoded": reconstruction_ras is not None,
         "crop_shape": list(LINET_CROP),
         "latent_shape": list(latent.shape),
         "output_shape": list(image.shape),
-        "diffusion_steps_actual": len(lesion_diffusion_timesteps(options.diffusion_steps)),
+        "diffusion_steps_requested": diffusion_steps,
+        "diffusion_steps_actual": actual_steps,
+        "sampler": options.sampler,
         "finite": True,
-        "attention": "source_explicit" if source_arithmetic else "mlx_fused_padded_fp16",
+        "attention": (
+            "source_explicit"
+            if source_arithmetic
+            else "flash_fp16_self_mlx_fused_padded_cross"
+            if nax_available(mx)
+            else "mlx_fused_padded_fp16"
+        ),
+        "nax_convolution_enabled": bool(nax_convolutions),
         "denoiser_compiled": not source_arithmetic,
+        "sampler_compiled": not source_arithmetic,
         "nax_convolutions": nax_convolutions,
         "load_and_condition_s": load_elapsed,
         "encode_s": encode_elapsed,
@@ -1038,11 +1214,9 @@ def _decode_ct(decoder: VqAutoencoder, latent: Array, dtype: Dtype, mx: Mlx) -> 
     decoded = decoder.decode(latent.astype(dtype))
     mx.eval(decoded)
     if not bool(mx.all(mx.isfinite(decoded)).item()):
-        overflow = (
-            " (FP16 overflow; conditioned mode decodes in FP32)" if dtype == mx.float16 else ""
-        )
+        precision = " (non-finite FP16 decoder output)" if decoded.dtype == mx.float16 else ""
         raise ModelExecutionError(
-            f"Native VQ decoder produced non-finite voxels before CT remapping{overflow}"
+            f"Native VQ decoder produced non-finite voxels before CT remapping{precision}"
         )
     decoded = piecewise_ct(decoded.astype(mx.float32), mx, inverse=True)
     mx.eval(decoded)
@@ -1214,6 +1388,10 @@ def _parse_options(
     inference_mode: object,
     output_region: object = DEFAULT_OUTPUT_REGION,
     lesion_mask_supplied: bool = False,
+    lmnet_diffusion_steps: object = None,
+    linet_diffusion_steps: object = None,
+    sampler: object = "ddim",
+    decoder_mode: object = "reference",
 ) -> LesionDiffusionOptions:
     """Validate request values and construct generation options."""
     for name, value in (
@@ -1229,6 +1407,8 @@ def _parse_options(
         ("specific_features", specific_features),
         ("inference_mode", inference_mode),
         ("output_region", output_region),
+        ("sampler", sampler),
+        ("decoder_mode", decoder_mode),
     ):
         if not isinstance(value, str):
             raise InvalidInputError(f"LesionDiffusion {name} must be a string")
@@ -1271,6 +1451,10 @@ def _parse_options(
         specific_features=cast(str, specific_features),
         bbox_center_voxel=center,
         diffusion_steps=cast(int, diffusion_steps),
+        lmnet_diffusion_steps=cast(int | None, lmnet_diffusion_steps),
+        linet_diffusion_steps=cast(int | None, linet_diffusion_steps),
+        sampler=cast(str, sampler),
+        decoder_mode=cast(str, decoder_mode),
         seed=cast(int, seed),
         inference_mode=cast(str, inference_mode),
         output_region=cast(str, output_region),

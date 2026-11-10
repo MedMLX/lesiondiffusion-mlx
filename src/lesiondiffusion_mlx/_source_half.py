@@ -343,6 +343,7 @@ def _norm_affine_kernels(mx: Mlx) -> tuple[MetalKernel, MetalKernel]:
 @lru_cache(maxsize=1)
 def _kernels(mx: Mlx) -> tuple[MetalKernel, MetalKernel, MetalKernel, MetalKernel, MetalKernel]:
     """Build or reuse the source-order half-precision Metal kernels."""
+
     def kernel(
         name: str, inputs: list[str], output: str, source: str, header: str = ""
     ) -> MetalKernel:
