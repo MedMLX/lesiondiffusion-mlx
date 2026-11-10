@@ -36,7 +36,7 @@ def source_to_ras(array: HostArray) -> HostArray:
 
 
 def source_crop(mask: HostArray, shape: tuple[int, int, int]) -> tuple[slice, slice, slice]:
-    """Return the fixed-size crop centred on a mask's bounding box, in source axes.
+    """Return the fixed-size crop centered on a mask's bounding box, in source axes.
 
     Args:
         mask: Boolean or label volume in source ``(Z, Y, X)`` order; non-zero voxels
@@ -45,7 +45,7 @@ def source_crop(mask: HostArray, shape: tuple[int, int, int]) -> tuple[slice, sl
             The helper assumes three positive sizes and does not validate them.
 
     Returns:
-        Slices of length ``shape`` per axis, centred on the midpoint of the mask's
+        Slices of length ``shape`` per axis, centered on the midpoint of the mask's
         extent (integer floor) and shifted to stay inside the volume.
 
     Raises:

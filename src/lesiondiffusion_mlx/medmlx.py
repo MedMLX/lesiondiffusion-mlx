@@ -976,7 +976,7 @@ def _run_linet(
     if not bool(mx.all(mx.isfinite(latent)).item()):
         raise ModelExecutionError("Native VQ encoder produced non-finite latents")
     encode_elapsed = time.perf_counter() - encode_started
-    # Lesion mask on the latent grid: nearest-neighbour resize, then binarize.
+    # Lesion mask on the latent grid: nearest-neighbor resize, then binarize.
     mask = vq.resize_nearest(
         cast(ArrayConstructor, mx.array)(lesion[None, None], dtype=mx.float16),
         tuple(int(value) for value in latent.shape[2:]),
@@ -1056,7 +1056,7 @@ def _decode_ct(decoder: VqAutoencoder, latent: Array, dtype: Dtype, mx: Mlx) -> 
 def _linet_latent_window(lesion: BoolArray) -> tuple[slice, slice, slice]:
     """Return LINet's sampling window on the latent grid for a source-order lesion.
 
-    The image crop is ``LINET_CROP`` centred on the lesion's bounding box. The latent
+    The image crop is ``LINET_CROP`` centered on the lesion's bounding box. The latent
     has half the image resolution (VQ factor two), so the crop bounds are halved,
     rounding down, as upstream does.
     """
@@ -1639,7 +1639,7 @@ def prepare_lesion_mask(
     """Load a supplied binary lesion mask that replaces LMNet's output.
 
     The file uses the runner's ``target_mask`` encoding, 0 background and 1 lesion, and
-    is standardized like the organ mask (RAS 1 mm, nearest neighbour, zero padding to
+    is standardized like the organ mask (RAS 1 mm, nearest neighbor, zero padding to
     even extents) onto the CT's grid. Upstream LINet reads lesion label 2 of LMNet's
     label map and ignores its organ label 1; this runner hands LINet the boolean
     lesion directly, so no organ label is needed and the lesion may extend past the
@@ -1717,7 +1717,7 @@ def _load_label_map(
     max_label: Literal[1, 104],
     resampling: Literal["source", "affine"] = "source",
 ) -> NumericArray:
-    """Load an integer label map onto ``reference``'s grid (nearest-neighbour, zero-padded).
+    """Load an integer label map onto ``reference``'s grid (nearest-neighbor, zero-padded).
 
     ``role`` names the map in error messages. Raises ``InvalidInputError`` if the file
     is unreadable, has non-finite values or labels outside the integer range

@@ -349,7 +349,7 @@ class SourceLayers:
         return (x * (1 + self.mx.erf(x / math.sqrt(2))) * 0.5).astype(dtype)
 
     def resize_nearest(self, x: Array, shape: tuple[int, ...]) -> Array:
-        """Nearest-neighbour resize of ``(B, C, D, H, W)`` to spatial ``shape`` (D, H, W).
+        """Nearest-neighbor resize of ``(B, C, D, H, W)`` to spatial ``shape`` (D, H, W).
 
         Output index ``i`` reads input index ``floor(i * in_size / out_size)``.
         """

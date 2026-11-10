@@ -463,7 +463,7 @@ def nax_conv3d(
         silu: Apply SiLU after ``affine``. FP16 mode rounds the prepared
             input once to FP16, as a separate normalize-SiLU kernel would.
         stride: 1 or 2, on every spatial axis.
-        upsample: Convolve the nearest-neighbour 2x upsampling of ``x``
+        upsample: Convolve the nearest-neighbor 2x upsampling of ``x``
             without materializing it (stride 1 only).
         residual: Optional NCDHW tensor of the output's shape, added in FP32
             before rounding.

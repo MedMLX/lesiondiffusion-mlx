@@ -113,7 +113,7 @@ Invalid inputs raise `InvalidInputError`; missing or mismatched weights raise
 
 ### Inference modes
 
-| `inference_mode` | Behaviour |
+| `inference_mode` | Behavior |
 | :--- | :--- |
 | `"conditioned"` (default) | Enables the inpainting network's trained text context, which the pinned upstream configuration turns off, and runs FP16 convolution, fused attention and compiled denoisers natively. Decodes in FP32, because the decoder's activations can exceed the FP16 range on some volumes |
 | `"source"` | Follows the upstream inference configuration and arithmetic for reproduction, including FP16 decoding; when that overflows, the run raises an error instead of writing a CT. Results can differ from conditioned output |
