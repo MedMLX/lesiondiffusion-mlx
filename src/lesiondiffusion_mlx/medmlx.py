@@ -12,13 +12,15 @@ from __future__ import annotations
 
 import gc
 import math
+import os
+import shutil
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from os import PathLike
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, mkdtemp
 from typing import TYPE_CHECKING, Final, Literal, NotRequired, TypedDict, cast
 
 import numpy as np
@@ -433,9 +435,9 @@ def run(
             as well and adds only the lesion's change to the input CT (see
             ``apply_lesion_change``), so the autoencoder's offset does not reach the
             output. It also writes ``raw_synthetic_image``.
-        overwrite: Replace existing output files instead of refusing. A failure before
-            the final file moves leaves no new outputs; a failure during those moves
-            can leave partial outputs that require ``overwrite`` for a retry.
+        overwrite: Replace existing output files instead of refusing. Failed final
+            file moves restore the prior output set; abrupt process termination during
+            publication can still leave partial outputs.
 
     Returns:
         ``{"outputs": ..., "details": ...}``. ``synthetic_image`` is float32 HU;
@@ -1925,8 +1927,8 @@ def materialize_arrays(
 
     All files, including ``organ_mask``, are first written in a private temporary
     directory beside their destinations and moved into place after every write succeeds.
-    A failure before the final moves leaves no new output that would block a retry
-    without ``overwrite``; a failure or interruption during those moves can leave a subset.
+    A failed final move restores the prior output set. Abrupt process termination
+    during publication can still leave a subset.
 
     In ``box`` mode the generated CT is kept over the smallest box containing both
     the requested box and the lesion (which LMNet does not confine to the box), so
@@ -2026,8 +2028,7 @@ def materialize_arrays(
                 destination=staged[role],
                 dtype=dtype,
             )
-        for role, path in staged.items():
-            path.replace(outputs[role])
+        _publish_outputs(staged, outputs)
     validation: OutputValidation = {
         "schema_version": 1,
         "lesion_voxel_count": int(lesion.sum()),
@@ -2035,6 +2036,43 @@ def materialize_arrays(
         "method": "input_grid_shape_and_finite_voxels",
     }
     return validation, compositing
+
+
+def _publish_outputs(staged: Mapping[str, Path], outputs: Mapping[str, Path]) -> None:
+    """Restore the prior output set if any staged file cannot be published."""
+    recovery = Path(
+        mkdtemp(prefix=".lesiondiffusion-backup-", dir=outputs["synthetic_image"].parent)
+    )
+    cleanup = True
+    try:
+        backups: dict[Path, Path] = {}
+        for index, role in enumerate(staged):
+            destination = outputs[role]
+            if destination.exists() or destination.is_symlink():
+                backup = recovery / str(index)
+                os.link(destination, backup, follow_symlinks=False)
+                backups[destination] = backup
+        changed: list[Path] = []
+        try:
+            for role, path in staged.items():
+                destination = outputs[role]
+                path.replace(destination)
+                changed.append(destination)
+        except BaseException:
+            try:
+                for destination in reversed(changed):
+                    backup = backups.get(destination)
+                    if backup is None:
+                        destination.unlink(missing_ok=True)
+                    else:
+                        os.replace(backup, destination)
+            except OSError as error:
+                cleanup = False
+                raise OSError(f"Cannot restore outputs; backups retained at {recovery}") from error
+            raise
+    finally:
+        if cleanup:
+            shutil.rmtree(recovery)
 
 
 def _save_like_reference(
