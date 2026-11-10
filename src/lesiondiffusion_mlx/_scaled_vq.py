@@ -52,10 +52,13 @@ class ScaledVqDecoder(VqAutoencoder):
         """Scale the trained upsampling convolution before its first half store."""
         if key != "decoder.up.1.upsample.conv":
             raise ValueError("Scaled FP16 VQ decoding requires the trained decoder layout")
+        packed = self._packed_weight(key)
+        if packed is None:
+            raise ValueError("Scaled FP16 VQ decoding requires packable convolution weights")
         return self._evaluated(
             nax_conv3d(
                 x,
-                self.nax_weights[key],
+                packed,
                 self.weights[key + ".bias"],
                 upsample=True,
                 output_scale=_SCALE,
@@ -98,10 +101,13 @@ class ScaledVqDecoder(VqAutoencoder):
         bias = self.weights[conv_key + ".bias"]
         if shift is not None:
             bias = bias.astype(mx.float32) + shift.astype(mx.float32)
+        packed = self._packed_weight(conv_key)
+        if packed is None:
+            raise ValueError("Scaled FP16 VQ decoding requires packable convolution weights")
         return self._evaluated(
             nax_conv3d(
                 x,
-                self.nax_weights[conv_key],
+                packed,
                 bias,
                 affine=affine,
                 silu=True,

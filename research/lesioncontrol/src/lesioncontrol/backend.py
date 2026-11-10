@@ -212,6 +212,7 @@ def generate(
     seed: int,
     conditioning_mean_hu: float | None = None,
     conditioner: ContextConditioner | None = None,
+    prepared: medmlx.PreparedGeneration | None = None,
 ) -> GenerationRecord:
     """Generate CT in a clean host using the supplied placement mask unchanged.
 
@@ -268,6 +269,7 @@ def generate(
             inference_mode="conditioned",
             output_region="lesion",
             seed=seed,
+            prepared=prepared,
         )
     _write_json(output_dir / "result.json", result)
     for role, path in result["outputs"].items():

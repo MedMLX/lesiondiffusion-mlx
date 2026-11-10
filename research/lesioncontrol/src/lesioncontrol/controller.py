@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TypedDict
 
 import numpy as np
+from lesiondiffusion_mlx.medmlx import PreparedGeneration
 from numpy.typing import NDArray
 from scipy.optimize import differential_evolution
 
@@ -305,6 +306,7 @@ def sample_reference(
     seed: int,
     adapter: Path | None = None,
     adapter_gain: float = 1.0,
+    prepared: PreparedGeneration | None = None,
 ) -> SampleRecord:
     """Generate one measured reference-conditioned lesion with an optional trained MLP.
 
@@ -332,6 +334,7 @@ def sample_reference(
         seed=seed,
         conditioning_mean_hu=_condition(profile.target_space, profile.target_mean_hu, host),
         conditioner=conditioner,
+        prepared=prepared,
     )
     features = extract_generated_features(
         profile, host, Path(generated["outputs"]["synthetic_image"])

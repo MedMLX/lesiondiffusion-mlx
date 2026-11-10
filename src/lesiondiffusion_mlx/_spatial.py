@@ -55,3 +55,15 @@ def upsample_nearest2(x: Array, *, mx: Mlx) -> Array:
         output_shapes=[(batch, channels, od, oh, ow)],
         output_dtypes=[x.dtype],
     )[0]
+
+
+def resize_nearest(x: Array, shape: tuple[int, ...], *, mx: Mlx) -> Array:
+    """Resize NCDHW spatial axes with the source's floor(i * in_size / out_size) rule."""
+    if len(shape) != 3:
+        raise ValueError("LesionDiffusion nearest resizing needs three spatial axes")
+    if x.ndim == 5 and min(x.shape) > 0 and shape == tuple(2 * s for s in x.shape[2:]):
+        return upsample_nearest2(x, mx=mx)
+    for axis, target in enumerate(shape, start=2):
+        indices = mx.floor(mx.arange(target) * (x.shape[axis] / target))
+        x = mx.take(x, indices.astype(mx.int32), axis=axis)
+    return x
