@@ -23,9 +23,11 @@ if TYPE_CHECKING:
         def enable_truncation(self, max_length: int) -> None:
             """Enable tokenizer truncation at the requested length."""
             ...
+
         def enable_padding(self, *, length: int, pad_id: int, pad_token: str) -> None:
             """Configure tokenizer padding and its token ID."""
             ...
+
         def encode_batch(self, inputs: Sequence[str]) -> list[Encoding]:
             """Encode a batch of input strings."""
             ...
@@ -70,6 +72,10 @@ if TYPE_CHECKING:
     class Mlx(CoreMlxRuntime, Protocol):
         """Native ``mlx.core`` operations injected into the model and pipeline."""
 
+        def async_eval(self, *arrays: Array) -> None:
+            """Submit arrays for asynchronous evaluation on their selected streams."""
+            ...
+
         @property
         def fast(self) -> Fast:
             """Return native fast operations and Metal-kernel construction."""
@@ -108,9 +114,12 @@ if TYPE_CHECKING:
         device_info = staticmethod(mx.device_info)
         erf = staticmethod(mx.erf)
         exp = staticmethod(mx.exp)
+        expm1 = staticmethod(mx.expm1)
         full = staticmethod(mx.full)
         isfinite = staticmethod(mx.isfinite)
+        log = staticmethod(mx.log)
         reciprocal = staticmethod(mx.reciprocal)
+        set_cache_limit = staticmethod(mx.set_cache_limit)
         sin = staticmethod(mx.sin)
         softmax = staticmethod(mx.softmax)
         sqrt = staticmethod(mx.sqrt)

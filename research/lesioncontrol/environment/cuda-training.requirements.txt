@@ -1,0 +1,16 @@
+# Standalone CUDA research trainer; Python 3.13 on a compatible NVIDIA host.
+--extra-index-url https://download.pytorch.org/whl/cu130
+
+# Versions retained in the completed training records.
+torch==2.13.0+cu130
+numpy==2.5.4
+safetensors==0.8.0
+
+# Imports required by the external ldm source. These follow the parent project's
+# reference/development constraints; their historical installed versions were not recorded.
+einops==0.8.2
+Pillow>=13,<14
+
+# ldm comes from the external LesionDiffusion source, not a PyPI package.
+# Canonical source revision: 880736e2b8a4d9becdb6594da7f8af6db19d04d1
+# Configure its pipeline directory as documented in docs/research.md.

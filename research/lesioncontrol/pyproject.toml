@@ -1,0 +1,67 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "medmlx-lesioncontrol"
+version = "0.1.0"
+description = "Reference-conditioned control of 3D lesion synthesis with MLX radiomics"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "lesiondiffusion-mlx==0.2.8",
+  "mlxradiomics==1.0.1",
+  "mlx==0.32.4; platform_system == 'Darwin' and platform_machine == 'arm64'",
+  "numpy==2.3.5",
+  "scipy==1.18.1",
+  "nibabel==5.4.2",
+  "SimpleITK==2.5.6",
+  "safetensors==0.8.0",
+  "tokenizers==0.22.2",
+]
+
+[project.scripts]
+lesioncontrol = "lesioncontrol.cli:main"
+
+[dependency-groups]
+dev = [
+  "pytest==9.1.1",
+  "ruff==0.15.21",
+  "pyright==1.1.414",
+  "scipy-stubs==1.18.1.1",
+]
+
+[tool.uv]
+environments = ["sys_platform == 'darwin' and platform_machine == 'arm64'"]
+required-environments = ["sys_platform == 'darwin' and platform_machine == 'arm64'"]
+constraint-dependencies = ["medmlx-core==0.2.6"]
+
+[tool.uv.sources]
+lesiondiffusion-mlx = { path = "../..", editable = true }
+mlxradiomics = { path = "../../../mlxradiomics", editable = true }
+medmlx-core = { path = "../../../medmlx/packages/core", editable = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lesioncontrol"]
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src/lesioncontrol", "pyproject.toml", "README.md"]
+
+[tool.pyright]
+include = ["src", "tests", "typings", "research/evaluate_adapter.py", "research/run_reliability.py", "research/analyze_reliability.py", "research/prepare_heldout.py", "research/qualify_heldout_geometry.py", "research/prepare_donor_extension.py"]
+stubPath = "typings"
+pythonVersion = "3.13"
+typeCheckingMode = "strict"
+enableTypeIgnoreComments = false
+reportUnnecessaryTypeIgnoreComment = "error"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ANN401"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-config --strict-markers"

@@ -48,9 +48,11 @@ class TorchModule(Protocol):
     def manual_seed(self, seed: int) -> torch_types.Generator:
         """Seed the reference Torch generator."""
         ...
+
     def no_grad(self) -> AbstractContextManager[None]:
         """Return the reference no-gradient context."""
         ...
+
     def randn(self, *size: int) -> torch_types.Tensor:
         """Draw reference normally distributed tensors."""
         ...
@@ -87,9 +89,7 @@ def admitted_source() -> Path:
 
 
 @pytest.fixture
-def oracle(
-    monkeypatch: PathPatcher, mx: Mlx, admitted_source: Path
-) -> tuple[TorchModule, Mlx]:
+def oracle(monkeypatch: PathPatcher, mx: Mlx, admitted_source: Path) -> tuple[TorchModule, Mlx]:
     """Provide reference Torch and native MLX runtimes for comparison."""
     torch = pytest.importorskip("torch")
     monkeypatch.syspath_prepend(str(admitted_source))

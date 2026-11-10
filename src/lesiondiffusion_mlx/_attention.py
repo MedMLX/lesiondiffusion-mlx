@@ -1,4 +1,4 @@
-"""FP32 flash attention for 32-wide heads, kept in the projection layout.
+"""Flash attention for 32-wide heads, kept in the projection layout.
 
 MLX 0.32 has no fused full-attention kernel for 32-wide FP32 heads. Using its
 64-wide kernel requires zero-padding heads to 64, doing twice the arithmetic.
@@ -26,6 +26,10 @@ per FP32 product. Each simdgroup owns 16 query rows; a ``16 x 32`` score tile
 already has the register layout of ``P V``'s left operand, so probabilities
 are split in registers. It runs at about the accelerators' FP16 throughput,
 roughly 1.5x the SIMD kernel on LMNet's 23104-token layers.
+
+FP16 self-attention uses direct NAX products with FP32 accumulation and online
+softmax state, rounding probabilities and final outputs to FP16. It keeps the
+same projection layout and avoids padding LINet's 32-wide heads to 64.
 """
 
 from __future__ import annotations
@@ -34,6 +38,7 @@ import math
 from functools import lru_cache
 from typing import TYPE_CHECKING, cast
 
+from lesiondiffusion_mlx._attention_half import flash_attention_half
 from lesiondiffusion_mlx._nax_conv import NAX_MMA_HEADER, nax_available
 from lesiondiffusion_mlx._typing import ArrayConstructor
 
@@ -278,11 +283,15 @@ for (short i = 0; i < 2; i++) {
 def flash_eligible(q: Array, k: Array, heads: int, mx: Mlx) -> bool:
     """Whether projections ``(B, L, heads * 32)`` fit the kernel.
 
-    Requires FP32, 32-wide heads, and query and key lengths divisible by 32.
+    Requires 32-wide heads and query/key lengths divisible by 32. FP32 supports
+    both kernels; FP16 additionally requires NAX and equal query/key lengths.
     """
     return (
-        q.dtype == mx.float32
-        and k.dtype == mx.float32
+        q.dtype == k.dtype
+        and (
+            q.dtype == mx.float32
+            or (q.dtype == mx.float16 and q.shape[1] == k.shape[1] and nax_available(mx))
+        )
         and int(q.shape[-1]) == heads * 32
         and int(k.shape[-1]) == heads * 32
         and int(q.shape[1]) % _BLOCK == 0
@@ -331,12 +340,15 @@ def flash_attention(q: Array, k: Array, v: Array, *, heads: int, scale: float, m
         mx: The imported ``mlx.core`` module.
 
     Returns:
-        ``(B, L, heads * 32)`` FP32 attention output in the same head layout,
+        ``(B, L, heads * 32)`` attention output in the inputs' dtype and head layout,
         ready for the output projection. On M5-class GPUs the NAX split-FP16
-        kernel computes it, which needs ``|q * scale * log2(e)|``, ``|k|`` and
+        kernel computes FP32 inputs, which needs ``|q * scale * log2(e)|``, ``|k|`` and
         ``|v|`` below 65504; these ranges are not checked. When ``nax_available``
-        is false, the FP32 SIMD kernel computes it.
+        is false, the FP32 SIMD kernel computes it. Eligible FP16 self-attention
+        uses direct NAX products, with FP32 accumulation and online softmax.
     """
+    if q.dtype == mx.float16:
+        return flash_attention_half(q, k, v, heads=heads, scale=scale, mx=mx)
     batch, length = int(q.shape[0]), int(q.shape[1])
     if nax_available(mx):
         (qh, ql), (kh, kl), (vh, vl) = (

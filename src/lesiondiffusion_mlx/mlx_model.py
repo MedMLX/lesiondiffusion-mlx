@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from itertools import pairwise
 from typing import TYPE_CHECKING, cast
@@ -424,7 +424,15 @@ class LdmUnet(SourceLayers):
             h, key + ".out_layers.0", key + ".out_layers.3", groups=groups, eps=1e-5, residual=x
         )
 
-    def attention(self, x: Array, context: Array | None, key: str, heads: int) -> Array:
+    def attention(
+        self,
+        x: Array,
+        context: Array | None,
+        key: str,
+        heads: int,
+        *,
+        projected_kv: tuple[Array, Array] | None = None,
+    ) -> Array:
         """Attend from ``x`` to ``context`` sequences, or to ``x`` when context is absent.
 
         Both inputs use ``(B, sequence, features)``; the projected feature size
@@ -432,14 +440,15 @@ class LdmUnet(SourceLayers):
         """
         mx = self.mx
         context = x if context is None else context
-        q, k, v = (
-            self.dense(x, key + ".to_q"),
-            self.dense(context, key + ".to_k"),
-            self.dense(context, key + ".to_v"),
+        q = self.dense(x, key + ".to_q")
+        k, v = (
+            (self.dense(context, key + ".to_k"), self.dense(context, key + ".to_v"))
+            if projected_kv is None
+            else projected_kv
         )
         depth = q.shape[-1] // heads
         if self.fused_attention and depth == 32 and flash_eligible(q, k, heads, mx):
-            # FP32 32-wide heads: unpadded flash kernel in the projection layout.
+            # Unpadded 32-wide heads in the projection layout; FP16 uses native NAX.
             result = flash_attention(q, k, v, heads=heads, scale=depth**-0.5, mx=mx)
             return self.dense(result, key + ".to_out.0")
 
@@ -494,7 +503,14 @@ class LdmUnet(SourceLayers):
             pieces.append(piece)
         return mx.concatenate(pieces, axis=2)
 
-    def transformer(self, x: Array, context: Array | None, key: str) -> Array:
+    def transformer(
+        self,
+        x: Array,
+        context: Array | None,
+        key: str,
+        *,
+        projected_kv: Mapping[str, tuple[Array, Array]] | None = None,
+    ) -> Array:
         """Apply self-attention, optional context attention and a feed-forward block.
 
         ``x`` is NCDHW; spatial voxels are flattened into the attention sequence
@@ -508,7 +524,11 @@ class LdmUnet(SourceLayers):
         block = key + ".transformer_blocks.0"
         x = x + self.attention(self.layer_norm(x, block + ".norm1"), None, block + ".attn1", heads)
         x = x + self.attention(
-            self.layer_norm(x, block + ".norm2"), context, block + ".attn2", heads
+            self.layer_norm(x, block + ".norm2"),
+            context,
+            block + ".attn2",
+            heads,
+            projected_kv=None if projected_kv is None else projected_kv.get(block + ".attn2"),
         )
         ff = self.gelu(self.dense(self.layer_norm(x, block + ".norm3"), block + ".ff.net.0.0"))
         x = x + self.dense(ff, block + ".ff.net.2")
@@ -529,6 +549,46 @@ class LdmUnet(SourceLayers):
             Prediction ``(B, C_out, D, H, W)``, computed in the weights' dtype
             (float32 for LMNet, float16 for LINet in the runner).
         """
+        return self._forward(x, timesteps, context)
+
+    def prepare_denoiser(self, context: Array | None) -> Callable[[Array, Array], Array]:
+        """Bind a fixed context and materialize its cross-attention projections once.
+
+        The returned callable accepts the evolving image and timestep. Its cache
+        belongs to this binding, so a subsequent request or different context
+        cannot reuse it accidentally. Weights and their dtype must remain fixed
+        for the binding's lifetime. Self-attention is always recomputed.
+        """
+        mx = self.mx
+        projected: Array | None = None
+        cache: dict[str, tuple[Array, Array]] = {}
+        if context is not None and not self.config.skip_context:
+            dtype = self.weights["time_embed.0.weight"].dtype
+            projected = self.dense(context.astype(dtype), "context_linear_projection")
+            for name in self.weights:
+                if name.endswith(".attn2.to_k.weight"):
+                    key = name.removesuffix(".to_k.weight")
+                    cache[key] = (
+                        self.dense(projected, key + ".to_k"),
+                        self.dense(projected, key + ".to_v"),
+                    )
+            mx.eval(projected, *(value for pair in cache.values() for value in pair))
+
+        def denoise(x: Array, timesteps: Array) -> Array:
+            """Predict noise with this binding's evaluated conditioning tensors."""
+            return self._forward(x, timesteps, projected, projected_kv=cache)
+
+        return denoise
+
+    def _forward(
+        self,
+        x: Array,
+        timesteps: Array,
+        context: Array | None,
+        *,
+        projected_kv: Mapping[str, tuple[Array, Array]] | None = None,
+    ) -> Array:
+        """Run the UNet with raw context, or already projected context and K/V."""
         mx, cfg = self.mx, self.config
         half = cfg.model_channels // 2
         frequency = mx.exp(-math.log(10000) * mx.arange(half, dtype=mx.float32) / half)
@@ -536,7 +596,7 @@ class LdmUnet(SourceLayers):
         emb = mx.concatenate([mx.cos(phase), mx.sin(phase)], axis=1)
         dtype = self.weights["time_embed.0.weight"].dtype
         emb = self.dense(self.silu(self.dense(emb.astype(dtype), "time_embed.0")), "time_embed.2")
-        if context is not None:
+        if context is not None and projected_kv is None:
             context = (
                 None
                 if cfg.skip_context
@@ -550,7 +610,7 @@ class LdmUnet(SourceLayers):
                 key = f"input_blocks.{block_index}"
                 x = self.residual(x, emb, key + ".0")
                 if resolution in cfg.attention_resolutions:
-                    x = self.transformer(x, context, key + ".1")
+                    x = self.transformer(x, context, key + ".1", projected_kv=projected_kv)
                 skips.append(x)
                 block_index += 1
             if level < len(cfg.channel_mult) - 1:
@@ -559,7 +619,7 @@ class LdmUnet(SourceLayers):
                 block_index += 1
                 resolution *= 2
         x = self.residual(x, emb, "middle_block.0")
-        x = self.transformer(x, context, "middle_block.1")
+        x = self.transformer(x, context, "middle_block.1", projected_kv=projected_kv)
         x = self.residual(x, emb, "middle_block.2")
         block_index = 0
         for level in reversed(range(len(cfg.channel_mult))):
@@ -568,7 +628,7 @@ class LdmUnet(SourceLayers):
                 x = self.residual(mx.concatenate([x, skips.pop()], axis=1), emb, key + ".0")
                 has_attention = resolution in cfg.attention_resolutions
                 if has_attention:
-                    x = self.transformer(x, context, key + ".1")
+                    x = self.transformer(x, context, key + ".1", projected_kv=projected_kv)
                 if level and block == cfg.num_res_blocks:
                     x = self.upsample_conv(x, key + f".{2 if has_attention else 1}.conv")
                     resolution //= 2
@@ -593,6 +653,8 @@ class VqAutoencoder(SourceLayers):
     this halves the encoder and decoder peaks. Evaluation order does not change the
     arithmetic.
     """
+
+    _codebook_norm_cache: tuple[Array, Array] | None = None
 
     def conv(self, x: Array, key: str, *, padding: int = 1, stride: int = 1) -> Array:
         """Apply ``SourceLayers.conv`` and evaluate the result."""
@@ -654,21 +716,46 @@ class VqAutoencoder(SourceLayers):
     def quantize(self, z: Array, *, chunk_size: int = 4096) -> Array:
         """Select a nearest codebook entry for each latent vector of NCDHW ``z``.
 
-        Nearest means smallest computed squared Euclidean distance; positions are
-        processed in chunks of ``chunk_size`` to bound the distance matrix. The
-        source's straight-through expression ``z + (selected - z)`` is retained,
-        so rounding can make the result differ from the selected entry. Selection
-        is discontinuous, so tiny rounding differences can change a chosen code.
+        Nearest means smallest computed squared Euclidean distance. Native
+        four-channel inference searches the codebook in one Metal dispatch without
+        a distance matrix; other paths use ``chunk_size`` positions at a time.
+        Codebook norms are reused until the codebook array is replaced. The source's
+        straight-through expression ``z + (selected - z)`` is retained, so rounding
+        can make the result differ from the selected entry. Selection is
+        discontinuous, so tiny rounding differences can change a chosen code.
         """
+        from lesiondiffusion_mlx._vq import nearest_codebook4
+
+        if chunk_size <= 0:
+            raise ValueError("VQ chunk_size must be positive")
         mx = self.mx
         shape = z.shape
         flat = mx.reshape(mx.transpose(z, (0, 2, 3, 4, 1)), (-1, shape[1]))
         codebook = self.weights["quantize.embedding.weight"]
         # Source half multiplication rounds each square, then torch.sum
         # accumulates in float32 and rounds once back to half.
-        codebook_norm = mx.sum((codebook * codebook).astype(mx.float32), axis=1).astype(
-            codebook.dtype
-        )
+        cached = self._codebook_norm_cache
+        if cached is None or cached[0] is not codebook:
+            codebook_norm = mx.sum((codebook * codebook).astype(mx.float32), axis=1).astype(
+                codebook.dtype
+            )
+            self._codebook_norm_cache = (codebook, codebook_norm)
+        else:
+            codebook_norm = cached[1]
+        if (
+            self.native_kernels
+            and not self.source_arithmetic
+            and flat.shape[1] == 4
+            and flat.shape[0] > 0
+            and codebook.shape[0] > 0
+            and flat.dtype == codebook.dtype
+            and flat.dtype in (mx.float16, mx.float32)
+        ):
+            selected = codebook[nearest_codebook4(flat, codebook, codebook_norm, mx)]
+            quantized = flat + (selected - flat)
+            return mx.transpose(
+                mx.reshape(quantized, (shape[0], *shape[2:], shape[1])), (0, 4, 1, 2, 3)
+            )
         pieces: list[Array] = []
         for start in range(0, flat.shape[0], chunk_size):
             part = flat[start : start + chunk_size]

@@ -405,9 +405,26 @@ def pack_upsample_weight(weight: Array, mx: Mlx) -> Array:
     return mx.contiguous(_split_planes(folded, mx) if exact else folded.astype(mx.float16))
 
 
-@lru_cache(maxsize=1)
-def _kernels(mx: Mlx) -> tuple[MetalKernel, MetalKernel, MetalKernel]:
-    """Reuse the kernel objects; MLX caches their specializations by template."""
+@lru_cache(maxsize=2)
+def _kernels(mx: Mlx, scaled: bool = False) -> tuple[MetalKernel, MetalKernel, MetalKernel]:
+    """Reuse kernels; branch scaling has separate source so the default stays unchanged."""
+    source, reduction = _SOURCE, _REDUCE
+    conv_inputs, reduce_inputs = ["x", "w", "bias", "res"], ["partials", "bias", "res"]
+    suffix = "_scaled" if scaled else ""
+    if scaled:
+        # Scale the convolution and its bias before storage, then add a residual
+        # already in the scaled representation. Scaling after the half store
+        # cannot recover a finite value from an overflowing convolution result.
+        source = source.replace(
+            "OT(sum + float(bias_b[col]) + (RESIDUAL ? float(res[at]) : 0.0f))",
+            "OT((sum + float(bias_b[col])) * output_scale[0] + (RESIDUAL ? float(res[at]) : 0.0f))",
+        )
+        reduction = reduction.replace(
+            "if (RESIDUAL) sum +=",
+            "sum *= output_scale[0];\nif (RESIDUAL) sum +=",
+        )
+        conv_inputs.append("output_scale")
+        reduce_inputs.append("output_scale")
     return (
         mx.fast.metal_kernel(
             name="lesion_nax_conv_pack",
@@ -416,17 +433,17 @@ def _kernels(mx: Mlx) -> tuple[MetalKernel, MetalKernel, MetalKernel]:
             source=_PACK,
         ),
         mx.fast.metal_kernel(
-            name="lesion_nax_conv3x3x3",
-            input_names=["x", "w", "bias", "res"],
+            name="lesion_nax_conv3x3x3" + suffix,
+            input_names=conv_inputs,
             output_names=["out"],
-            source=_SOURCE,
+            source=source,
             header=NAX_MMA_HEADER,
         ),
         mx.fast.metal_kernel(
-            name="lesion_nax_conv_reduce",
-            input_names=["partials", "bias", "res"],
+            name="lesion_nax_conv_reduce" + suffix,
+            input_names=reduce_inputs,
             output_names=["out"],
-            source=_REDUCE,
+            source=reduction,
         ),
     )
 
@@ -440,6 +457,7 @@ def nax_conv3d(
     silu: bool = False,
     stride: int = 1,
     upsample: bool = False,
+    output_scale: float = 1.0,
     residual: Array | None = None,
     mx: Mlx,
 ) -> Array:
@@ -467,6 +485,8 @@ def nax_conv3d(
             without materializing it (stride 1 only).
         residual: Optional NCDHW tensor of the output's shape, added in FP32
             before rounding.
+        output_scale: Scale the convolution and bias before the output store,
+            leaving the residual unchanged. The default uses the original kernels.
         mx: The imported ``mlx.core`` module.
 
     Returns:
@@ -494,7 +514,8 @@ def nax_conv3d(
     rows = (d + 2) * p
     # The conv kernel's row grid: output voxels, or source voxels when UP.
     grid = (d, h, w) if stride == 1 else tuple((n - 1) // 2 + 1 for n in (d, h, w))
-    pack_kernel, conv_kernel, reduce_kernel = _kernels(mx)
+    scaled = output_scale != 1.0
+    pack_kernel, conv_kernel, reduce_kernel = _kernels(mx, scaled)
     # Largest power-of-two channel chunk (at least 8) whose staged line of
     # W x (chunk + 2) halves fits in 16 KiB of threadgroup memory.
     chunk = 8
@@ -540,8 +561,12 @@ def nax_conv3d(
         and math.prod(grid) % 4 == 0
         else 1
     )
+    conv_inputs = [flat, packed, bias, residual if residual is not None else flat]
+    scale_array = mx.full((1,), output_scale, dtype=mx.float32) if scaled else None
+    if scale_array is not None:
+        conv_inputs.append(scale_array)
     output = conv_kernel(
-        inputs=[flat, packed, bias, residual if residual is not None else flat],
+        inputs=conv_inputs,
         template=[
             ("C", channels),
             ("O", width),
@@ -573,8 +598,11 @@ def nax_conv3d(
     if split == 1:
         return output
     size = math.prod(output_shape)
+    reduce_inputs = [output, bias, residual if residual is not None else output]
+    if scale_array is not None:
+        reduce_inputs.append(scale_array)
     return reduce_kernel(
-        inputs=[output, bias, residual if residual is not None else output],
+        inputs=reduce_inputs,
         template=[
             ("N", size),
             ("SPATIAL", math.prod(grid)),
