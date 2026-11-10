@@ -26,7 +26,10 @@ def _nearest_reference(flat: Array, codebook: Array, mx: Mlx) -> tuple[Array, Ar
 
 
 @pytest.mark.parametrize("dtype_name", ["float32", "float16"])
-def test_native_vq_preserves_quantized_values_on_strided_batches(dtype_name: str, mx: Mlx) -> None:
+@pytest.mark.parametrize("native_kernels", [True, False], ids=["native", "chunked"])
+def test_vq_preserves_quantized_values_on_strided_batches(
+    dtype_name: str, native_kernels: bool, mx: Mlx
+) -> None:
     """Fused search must keep code selection and source straight-through rounding."""
     rng = np.random.default_rng(2701)
     dtype = getattr(mx, dtype_name)
@@ -37,7 +40,10 @@ def test_native_vq_preserves_quantized_values_on_strided_batches(dtype_name: str
     indices, _ = _nearest_reference(flat, codebook, mx)
     expected = flat + (codebook[indices] - flat)
     expected = mx.transpose(mx.reshape(expected, (2, 9, 8, 7, 4)), (0, 4, 1, 2, 3))
-    model = VqAutoencoder({"quantize.embedding.weight": codebook}, mx, source_arithmetic=False)
+    model = VqAutoencoder(
+        {"quantize.embedding.weight": codebook}, mx,
+        source_arithmetic=False, native_kernels=native_kernels,
+    )
     actual = model.quantize(z, chunk_size=37)
     mx.eval(actual, expected)
     assert actual.dtype == expected.dtype

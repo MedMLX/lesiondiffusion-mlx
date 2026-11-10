@@ -767,7 +767,10 @@ class VqAutoencoder(SourceLayers):
             selected = codebook[mx.argmin(distance, axis=1)]
             # Upstream VectorQuantizer retains its straight-through arithmetic
             # during inference too; fp16 cancellation changes the returned values.
-            pieces.append(part + (selected - part))
+            quantized = part + (selected - part)
+            mx.eval(quantized)
+            pieces.append(quantized)
+            del part, distance, selected
         return mx.transpose(
             mx.reshape(mx.concatenate(pieces), (shape[0], *shape[2:], shape[1])),
             (0, 4, 1, 2, 3),
