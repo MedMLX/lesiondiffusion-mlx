@@ -8,7 +8,9 @@ from typing import Protocol, cast
 import nibabel as nib
 import numpy as np
 import pytest
+from hcc_fixture import ct_cube
 from numpy.typing import NDArray
+from scipy import ndimage
 
 from lesioncontrol.profile import (
     ReferenceProfile,
@@ -32,45 +34,47 @@ def _save(path: Path, data: NDArray[np.float32]) -> Path:
 
 
 @pytest.fixture
-def prepared(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+def prepared(tmp_path: Path) -> tuple[Path, Path, Path, Path, float]:
     """Use integer HU so a uniform scan offset has no rounding ambiguity."""
     shape = (128, 128, 128)
-    image = np.full(shape, 80, dtype=np.float32)
+    image = ct_cube()
     mask = np.zeros(shape, dtype=np.float32)
     mask[56:72, 56:72, 56:72] = 1
-    x, y, z = np.indices((16, 16, 16))
-    image[56:72, 56:72, 56:72] = 40 + 2 * ((3 * x + 5 * y + 7 * z) % 31)
+    distance = ndimage.distance_transform_edt(mask == 0)
+    ring = (distance >= 3) & (distance <= 10)
+    ring_mean = float(np.mean(image[ring], dtype=np.float64))
     return (
         _save(tmp_path / "image.nii.gz", image),
         _save(tmp_path / "shifted.nii.gz", image + np.float32(32)),
         _save(tmp_path / "mask.nii.gz", mask),
         _save(tmp_path / "liver.nii.gz", np.ones(shape, dtype=np.float32)),
+        ring_mean,
     )
 
 
 def test_contrast_profile_removes_scan_offset_before_discretization(
-    prepared: tuple[Path, Path, Path, Path],
+    prepared: tuple[Path, Path, Path, Path, float],
 ) -> None:
     """A scan-wide HU shift affects absolute targets, not liver-relative targets."""
-    image, shifted, mask, liver = prepared
+    image, shifted, mask, liver, ring_mean = prepared
     contrast = build_profile(image, mask, liver, target_space="liver_contrast")
     shifted_contrast = build_profile(shifted, mask, liver, target_space="liver_contrast")
     absolute = build_profile(image, mask, liver, target_space="absolute_hu")
     shifted_absolute = build_profile(shifted, mask, liver, target_space="absolute_hu")
     assert contrast.features == shifted_contrast.features
-    assert absolute.target_mean_hu - contrast.target_mean_hu == pytest.approx(80, abs=1e-5)
+    assert absolute.target_mean_hu - contrast.target_mean_hu == pytest.approx(ring_mean, abs=1e-5)
     assert shifted_absolute.target_mean_hu - absolute.target_mean_hu == pytest.approx(32, abs=1e-5)
 
 
 def test_known_tumor_anywhere_in_encoded_host_is_rejected(
-    prepared: tuple[Path, Path, Path, Path], tmp_path: Path
+    prepared: tuple[Path, Path, Path, Path, float], tmp_path: Path
 ) -> None:
     """VQ sees the full crop, including tumors far outside the placement mask."""
-    image, _, mask, liver = prepared
+    image, _, mask, liver, ring_mean = prepared
     known = np.zeros((128, 128, 128), dtype=np.float32)
     known_path = _save(tmp_path / "known.nii.gz", known)
     host = load_host(image, liver, mask, known_tumor_mask=known_path)
-    assert host.ring_mean_hu == 80
+    assert host.ring_mean_hu == ring_mean
     known[4, 4, 4] = 1
     _save(known_path, known)
     with pytest.raises(ValueError, match="full encoded host"):

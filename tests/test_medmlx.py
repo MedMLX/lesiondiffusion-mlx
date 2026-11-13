@@ -77,12 +77,20 @@ def test_upstream_threshold_selection() -> None:
 @pytest.mark.parametrize("reach", [3, 33])
 def test_lesion_output_cancels_reconstruction_offset_and_keeps_distant_input(reach: int) -> None:
     """Lesion output adds only the inpainted change; voxels beyond reach keep the input."""
-    rng = np.random.default_rng(7)
     shift = reach - 3
     shape = tuple(size + 2 * shift for size in (24, 20, 18))
-    original = rng.normal(40.0, 15.0, shape).astype(np.float32)
-    # Bone above the decoders' 1000 HU clip, beyond and within the lesion's reach.
-    original[0, 0, 0] = original[8 + shift, 6 + shift, 5 + shift] = 1500.0
+    default = Path.home() / ".cache" / "medmlx" / "test-data" / "hcc_063_ct.nii.gz"
+    source = os.environ.get("MEDMLX_TEST_CT", str(default))
+    data = np.asarray(nib.load(source).dataobj, dtype=np.float32)
+    start = (224 - shift, 330 - shift, 30 - shift)
+    original = data[
+        start[0] : start[0] + shape[0],
+        start[1] : start[1] + shape[1],
+        start[2] : start[2] + shape[2],
+    ]
+    assert original.shape == shape
+    # This source voxel is bone above the decoder's 1000 HU clip.
+    assert original[8 + shift, 6 + shift, 5 + shift] > 1000
     lesion = np.zeros(original.shape, dtype=bool)
     lesion[10 + shift : 13 + shift, 8 + shift : 11 + shift, 7 + shift : 10 + shift] = True
     # The autoencoder shifts every decoded voxel by -9 HU; inpainting darkens the
@@ -111,7 +119,9 @@ def test_lesion_output_cancels_reconstruction_offset_and_keeps_distant_input(rea
     reached = np.zeros(original.shape, dtype=bool)
     reached[7 : 16 + 2 * shift, 5 : 14 + 2 * shift, 4 : 13 + 2 * shift] = True
     np.testing.assert_array_equal(localized[~reached], original[~reached])
-    assert localized[8 + shift, 6 + shift, 5 + shift] == 1500.25
+    assert localized[8 + shift, 6 + shift, 5 + shift] == (
+        original[8 + shift, 6 + shift, 5 + shift] + 0.25
+    )
     np.testing.assert_array_equal(
         localized[reached & ~shell], original[reached & ~shell] + np.float32(0.25)
     )
@@ -207,12 +217,13 @@ def tiny_networks(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def scan(tmp_path: Path) -> tuple[Path, Path]:
-    """Write a synthetic CT and organ mask on a shared grid."""
+    """Write matched HCC-TACE CT and inclusive liver crops on a controlled grid."""
     affine = cases.ras_affine((30.5, -42.0, 117.0))
     ct = tmp_path / "ct.nii.gz"
     organ = tmp_path / "liver.nii.gz"
-    nib.save(nib.Nifti1Image(cases.ct_data(), affine), ct)
-    nib.save(nib.Nifti1Image(cases.organ_block(), affine), organ)
+    image, mask, _ = cases.real_scan_data()
+    nib.save(nib.Nifti1Image(image, affine), ct)
+    nib.save(nib.Nifti1Image(mask, affine), organ)
     return ct, organ
 
 
@@ -438,7 +449,7 @@ def test_run_matches_upstream_end_to_end(
     # a uniform HU bound invalid for independently computed latents.
     np.testing.assert_allclose(actual, cast(NumericArray, fixture["output"]), atol=8, rtol=0)
     assert np.array_equal(np.asanyarray(images["target_mask"].dataobj), fixture["lesion"])
-    assert np.array_equal(np.asanyarray(images["organ_mask"].dataobj), cases.organ_block())
+    assert np.array_equal(np.asanyarray(images["organ_mask"].dataobj), cases.real_scan_data()[1])
 
 
 def test_native_generation_is_finite_and_repeats_its_seed(
@@ -508,8 +519,7 @@ def test_prepared_draws_preserve_independent_outputs_and_rng(
     """Repeated host preparation keeps pristine state, fresh conditions and RNG progression."""
     if decoder_mode == "scaled_fp16" and not nax_available(mx):
         pytest.skip("Scaled FP16 decoder requires NAX")
-    lesion = np.zeros(cases.CT_SHAPE, dtype=np.uint8)
-    lesion[9:13, 9:13, 7:11] = 1
+    _, _, lesion = cases.real_scan_data()
     lesion_path = tmp_path / "lesion.nii.gz"
     nib.save(nib.Nifti1Image(lesion, nib.load(scan[0]).affine), lesion_path)
     arguments = _arguments(

@@ -27,6 +27,7 @@ import pytest
 
 from lesiondiffusion_mlx import DdimSampler, lesion_diffusion_timesteps
 from lesiondiffusion_mlx._arrays import NumericArray
+from lesiondiffusion_mlx._nifti import nib
 from lesiondiffusion_mlx._typing import ArrayConstructor
 from lesiondiffusion_mlx.mlx_model import (
     LMNET_CONFIG,
@@ -176,7 +177,12 @@ def test_vq_encoder_decoder_match_source(oracle: tuple[TorchModule, Mlx]) -> Non
     ):
         weights.update({prefix + "." + key: value for key, value in mlx_weights(model, mx).items()})
     native = VqAutoencoder(weights, mx)
-    x = torch.randn(1, 1, 8, 12, 16)
+    path = Path(os.environ.get(
+        "MEDMLX_TEST_CT",
+        str(Path.home() / ".cache/medmlx/test-data/hcc_063_ct.nii.gz"),
+    ))
+    ct = np.asarray(nib.load(path).dataobj, dtype=np.float32)[100:108, 210:222, 55:71]
+    x = from_numpy(np.clip(ct / np.float32(1024), -1, 1)[None, None].copy())
     with torch.no_grad():
         z = quant_conv(encoder(x))
         expected = decoder(post_quant(z), use_checkpoint=False).numpy()

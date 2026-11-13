@@ -11,6 +11,7 @@ import mlx.core as mx
 import nibabel as nib
 import numpy as np
 import pytest
+from hcc_fixture import ct_cube
 from lesiondiffusion_mlx.mlx_model import BiomedTextEncoder, VqAutoencoder
 
 from lesioncontrol import training_cache
@@ -40,9 +41,10 @@ def test_completed_cache_avoids_models_and_rejects_replaced_assets(
         {"vq.encoder.unused": mx.zeros((1,)), "linet.alphas_cumprod": mx.ones((1000,))},
     )
     (weights / "tokenizer.json").write_text('{"fixture":true}')
-    image = np.full((128, 128, 128), 80, dtype=np.float32)
+    image = ct_cube()
     mask = np.zeros_like(image)
     mask[56:72, 56:72, 56:72] = 1
+    mean_hu = float(np.mean(image[mask > 0], dtype=np.float64))
     paths = [tmp_path / f"{name}.nii.gz" for name in ("ct", "mask", "liver")]
     for path, array in zip(paths, (image, mask, np.ones_like(image)), strict=True):
         cast(_Writable, nib.Nifti1Image(array, np.eye(4))).to_filename(str(path))
@@ -78,7 +80,7 @@ def test_completed_cache_avoids_models_and_rejects_replaced_assets(
     def frozen_context(
         attributes: dict[str, object], text: BiomedTextEncoder, tokenizer: Path, runtime: Mlx
     ) -> mx.array:
-        assert attributes["CT value"] == "80.0 HU,"
+        assert attributes["CT value"] == f"{mean_hu} HU,"
         return runtime.full((1, 10, 512), 2.5, dtype=runtime.float32)
 
     monkeypatch.setattr(training_cache, "build_profile", fixed_profile)
