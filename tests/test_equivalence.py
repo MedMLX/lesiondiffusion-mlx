@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from tests._fixture_models import ArrayFactory
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -41,7 +42,14 @@ def reference(name: str) -> dict[str, HostArray]:
         assert fixture["text_revision"].item() == REFERENCE["text_revision"]
         assert fixture["backend"].item() == "torch-cpu"
         assert fixture["recording_platform"].item() == "darwin-arm64"
-        return cast(dict[str, HostArray], dict(fixture))
+        arrays = cast(dict[str, HostArray], dict(fixture))
+    if name in {"runner_host", "generation", "vq_float32", "vq_float16", "pipeline"}:
+        default = Path(__file__).resolve().parents[1] / "work/real-reference"
+        directory = Path(os.environ.get("MEDMLX_TEST_REFERENCES", str(default)))
+        with np.load(directory / f"{name}.npz", allow_pickle=False) as fixture:
+            assert fixture["upstream_revision"].item() == REFERENCE["revision"]
+            arrays.update(cast(dict[str, HostArray], dict(fixture)))
+    return arrays
 
 
 def assert_bits(actual: Array | HostArray, expected: HostArray) -> None:
