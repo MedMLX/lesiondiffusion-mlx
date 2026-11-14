@@ -50,9 +50,14 @@ result = run(
     lesion_type="tumor",
     bbox_size_mm=[30, 30, 20],
     placement="inside_parenchyma",
+    output_region="lesion",
 )
 print(result["outputs"]["synthetic_image"])
 ```
+
+The synthetic CT is written on the standardized RAS 1 mm grid. `output_region="lesion"`
+limits changes to the neighborhood of the lesion; the default `"full"` reconstructs the
+whole volume (see below).
 
 Weights download from `MedMLX/lesiondiffusion-mlx` on first use; `medmlx setup lesiondiffusion`
 downloads them ahead of time. To use your own copy, pass a folder containing
