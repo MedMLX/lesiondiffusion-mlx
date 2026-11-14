@@ -72,7 +72,7 @@ if TYPE_CHECKING:
     class Mlx(CoreMlxRuntime, Protocol):
         """Native ``mlx.core`` operations injected into the model and pipeline."""
 
-        def async_eval(self, *arrays: Array) -> None:
+        def async_eval(self, *arrays: Array | Sequence[Array]) -> None:
             """Submit arrays for asynchronous evaluation on their selected streams."""
             ...
 

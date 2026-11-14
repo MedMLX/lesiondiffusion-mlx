@@ -16,7 +16,7 @@ from typing import Literal, TypedDict, cast
 
 import nibabel as nib
 import numpy as np
-from lesiondiffusion_mlx.medmlx import PreparedGeneration
+from lesiondiffusion_mlx.medmlx import load_model
 
 from lesioncontrol.backend import GenerationControls
 from lesioncontrol.controller import sample_reference
@@ -204,7 +204,7 @@ def run(root: Path) -> None:
             Path(case["placed_mask"]),
             known_tumor_mask=Path(case["known_tumors_mask"]),
         )
-        with PreparedGeneration() as prepared:
+        with load_model(weights_path=Path(cast(str, plan["weights"]))) as model:
             for seed in seeds:
                 pair: list[DrawRecord] = []
                 for gain in (0, 1):
@@ -232,7 +232,7 @@ def run(root: Path) -> None:
                             seed=seed,
                             adapter=Path(cast(str, plan["adapter"])),
                             adapter_gain=gain,
-                            prepared=prepared,
+                            model=model,
                         )
                     arguments = cast(
                         dict[str, object], json.loads((output / "arguments.json").read_text())
@@ -288,7 +288,7 @@ def run(root: Path) -> None:
                     metrics_path = output / "reliability_metrics.json"
                     if not aligned_path.exists() or not metrics_path.exists():
                         image = np.asarray(
-                            nib.Nifti1Image.from_filename(outputs["synthetic_image"]).dataobj,
+                            nib.Nifti1Image.from_filename(outputs["image"]).dataobj,
                             dtype=np.float32,
                         )
                         relative = image - np.float32(host.ring_mean_hu)

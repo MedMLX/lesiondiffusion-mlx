@@ -397,40 +397,19 @@ class _PreparedState:
     reconstruction: FloatArray | None = None
 
 
-class PreparedGeneration:
-    """Bounded cache for repeated draws on one CT and supplied lesion outline.
+class _Preparation:
+    """One CT's validated geometry, pristine latent and reconstruction, owned by a model.
 
-    Pass the session to ``generate(prepared=...)`` inside a ``with`` block. The first
-    draw retains validated geometry, a pristine evaluated latent and, for lesion
-    output, the unmodified reconstruction. Later draws reuse them while rebuilding
-    text conditioning, sampler history and seed state. Changing an input/model
-    file, organ, preprocessing mode, decoder or output region requires a new
-    session. ``close`` releases its host arrays and native latent.
+    The first draw binds the files and execution modes and fills :attr:`state`; later
+    draws reuse it while rebuilding text conditioning, sampler history and seed state.
     """
 
     def __init__(self) -> None:
         self._identity: _PreparedIdentity | None = None
         self.state = _PreparedState()
-        self._closed = False
-
-    def __enter__(self) -> Self:
-        if self._closed:
-            raise InvalidInputError("PreparedGeneration is closed")
-        return self
-
-    def __exit__(self, *_exception: object) -> None:
-        self.close()
-
-    def close(self) -> None:
-        """Release this host's retained preparation and prevent further draws."""
-        self.state = _PreparedState()
-        self._identity = None
-        self._closed = True
 
     def bind(self, files: Sequence[Path], options: LesionDiffusionOptions) -> None:
         """Reject changed files/settings before any cached data can be reused."""
-        if self._closed:
-            raise InvalidInputError("PreparedGeneration is closed")
         records: list[tuple[str, int, int, int, int, int]] = []
         for path in files:
             resolved = path.resolve()
@@ -444,7 +423,10 @@ class PreparedGeneration:
             options.decoder_mode, options.output_region,
         )
         if self._identity is not None and self._identity != identity:
-            raise InvalidInputError("PreparedGeneration inputs, weights or execution modes changed")
+            raise InvalidInputError(
+                "LesionDiffusion model inputs, weights or execution modes changed; "
+                "load a new model for another CT, lesion mask or mode"
+            )
         self._identity = identity
 
 
@@ -477,7 +459,6 @@ def generate(
     inference_mode: str = DEFAULT_INFERENCE_MODE,
     output_region: str = DEFAULT_OUTPUT_REGION,
     overwrite: bool = False,
-    prepared: PreparedGeneration | None = None,
 ) -> RunResult:
     """Insert one synthetic lesion into a CT and write NIfTI outputs.
 
@@ -490,7 +471,8 @@ def generate(
     CT, nearest for masks) and padded to even extents for the VQ stages, then outputs
     are cropped back to that standardized grid, which is the input grid when the
     input is already RAS 1 mm. An LMNet lesion is not constrained to the box or the
-    organ. Output is synthetic and needs human review.
+    organ. Output is synthetic and needs human review. For repeated draws on one CT
+    and supplied lesion mask, :func:`load_model` reuses their preparation.
 
     Args:
         image_path: 3-D CT, ``.nii`` or ``.nii.gz``, finite values in HU.
@@ -574,8 +556,6 @@ def generate(
         overwrite: Replace existing output files instead of refusing. Failed final
             file moves restore the prior output set; abrupt process termination during
             publication can still leave partial outputs.
-        prepared: Optional bounded session for repeated seeds or text controls with
-            the same CT, organ mask and supplied lesion mask. Use as a context manager.
 
     Returns:
         ``{"outputs": ..., "details": ...}``. ``image`` is float32 HU;
@@ -614,6 +594,133 @@ def generate(
         output_region=output_region,
         lesion_mask_supplied=lesion_mask_path is not None,
     )
+    return _generate(
+        None, options, image_path=image_path, organ_mask_path=organ_mask_path,
+        anatomy_mask_path=anatomy_mask_path, lesion_mask_path=lesion_mask_path,
+        output_dir=output_dir, weights_path=weights_path, overwrite=overwrite,
+    )
+
+
+class LesionDiffusionModel:
+    """Repeated LesionDiffusion draws on one CT and supplied lesion mask.
+
+    The first :meth:`generate` call binds the CT, organ mask, lesion mask, weights,
+    organ, inference mode, decoder mode and output region, and keeps the validated
+    geometry, the pristine encoded latent and, for ``output_region="lesion"``, the
+    unmodified reconstruction. Each later draw builds fresh text conditioning,
+    sampler history and RNG state from its own arguments, so its outputs equal those
+    of :func:`generate` with the same arguments. Seeds, phenotype text, LINet steps
+    and the sampler may change between draws. Draws run one at a time.
+    """
+
+    def __init__(self, *, weights_path: _PathArg | None = None) -> None:
+        """Resolve (downloading if omitted) the weights folder; nothing is prepared yet."""
+        self._folder = weights_dir(MODEL_ID) if weights_path is None else weights_path
+        self._preparation: _Preparation | None = _Preparation()
+
+    def generate(
+        self,
+        *,
+        image_path: _PathArg,
+        organ_mask_path: _PathArg,
+        lesion_mask_path: _PathArg,
+        output_dir: _PathArg,
+        organ: str,
+        lesion_type: str,
+        placement: str,
+        shape: str = "irregular",
+        density: str = "hypodense lesion",
+        density_variation: str = "heterogeneous",
+        enhancement: str = "non-contrast CT",
+        surface: str = "ill-defined margin",
+        adjacent_relationship: str = "no close relationship with surrounding organs",
+        specific_features: str = "",
+        diffusion_steps: int = DEFAULT_DIFFUSION_STEPS,
+        linet_diffusion_steps: int | None = None,
+        sampler: str = "ddim",
+        decoder_mode: str = "reference",
+        seed: int = DEFAULT_SEED,
+        inference_mode: str = DEFAULT_INFERENCE_MODE,
+        output_region: str = DEFAULT_OUTPUT_REGION,
+        overwrite: bool = False,
+    ) -> RunResult:
+        """Draw one lesion into the bound CT; see :func:`generate` for each argument.
+
+        LMNet does not run because the lesion mask is supplied, so the box and
+        anatomy arguments are absent.
+
+        Raises:
+            InvalidInputError: As :func:`generate`, or a bound input, weight file or
+                mode differs from the first draw's.
+            RuntimeError: The model is closed.
+        """
+        preparation = self._preparation
+        if preparation is None:
+            raise RuntimeError("LesionDiffusion model is closed")
+        options = _parse_options(
+            organ=organ,
+            lesion_type=lesion_type,
+            bbox_size_mm=None,
+            placement=placement,
+            shape=shape,
+            density=density,
+            density_variation=density_variation,
+            enhancement=enhancement,
+            surface=surface,
+            adjacent_relationship=adjacent_relationship,
+            specific_features=specific_features,
+            bbox_center_voxel=None,
+            diffusion_steps=diffusion_steps,
+            lmnet_diffusion_steps=None,
+            linet_diffusion_steps=linet_diffusion_steps,
+            sampler=sampler,
+            decoder_mode=decoder_mode,
+            seed=seed,
+            inference_mode=inference_mode,
+            output_region=output_region,
+            lesion_mask_supplied=True,
+        )
+        return _generate(
+            preparation, options, image_path=image_path, organ_mask_path=organ_mask_path,
+            anatomy_mask_path=None, lesion_mask_path=lesion_mask_path,
+            output_dir=output_dir, weights_path=self._folder, overwrite=overwrite,
+        )
+
+    def close(self) -> None:
+        """Release the retained preparation; later :meth:`generate` calls raise."""
+        self._preparation = None
+
+    def __enter__(self) -> Self:
+        """Return this model for a ``with`` block that closes it on exit."""
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        """Close the model."""
+        self.close()
+
+
+def load_model(*, weights_path: _PathArg | None = None) -> LesionDiffusionModel:
+    """Return a model for repeated draws on one CT and supplied lesion mask.
+
+    ``weights_path`` has the meaning it has in :func:`generate`. Close the model, or
+    use it as a context manager, to release the retained arrays.
+    """
+    return LesionDiffusionModel(weights_path=weights_path)
+
+
+def _generate(
+    prepared: _Preparation | None,
+    options: LesionDiffusionOptions,
+    *,
+    image_path: _PathArg,
+    organ_mask_path: _PathArg,
+    anatomy_mask_path: _PathArg | None,
+    lesion_mask_path: _PathArg | None,
+    output_dir: _PathArg,
+    weights_path: _PathArg | None,
+    overwrite: bool,
+) -> RunResult:
+    """Check inputs and targets, resolve weights, then run one draw with ``prepared``."""
     source, supplied_mask, outputs = _run_paths(
         image_path=image_path,
         organ_mask_path=organ_mask_path,
@@ -632,7 +739,7 @@ def generate(
     directory = require_weights(folder, inference_mode=options.inference_mode)
     if prepared is not None:
         if lesion_path is None:
-            raise InvalidInputError("PreparedGeneration requires a supplied lesion_mask_path")
+            raise InvalidInputError("LesionDiffusion model draws need lesion_mask_path")
         prepared.bind(
             (source, supplied_mask, lesion_path, directory / "model.safetensors",
              directory / TOKENIZER_FILE), options,
@@ -728,7 +835,7 @@ def _execute_run(
     options: LesionDiffusionOptions,
     directory: Path,
     outputs: dict[str, Path],
-    *, prepared: PreparedGeneration | None = None,
+    *, prepared: _Preparation | None = None,
 ) -> tuple[GenerationSpec, dict[str, dict[str, object]]]:
     """Run native generation and write its validated outputs."""
     model_label, _ = source_organ_label(options.organ)
@@ -881,7 +988,7 @@ def run_native_pipeline(
     on_stage_completed: Callable[[str, dict[str, object]], None],
     anatomy_mask_ras: HostArray | None = None,
     lesion_mask_ras: BoolArray | None = None,
-    prepared: PreparedGeneration | None = None,
+    prepared: _Preparation | None = None,
 ) -> tuple[HostArray, HostArray | None, HostArray, NativeRuntime]:
     """Run LMNet, then LINet and the VQ decoder, with the released EMA weights.
 
@@ -930,7 +1037,7 @@ def run_native_pipeline(
             "lesion mask skips"
         )
     if prepared is not None and prepared.state.geometry is None:
-        raise InvalidInputError("Bind PreparedGeneration through the file runner first")
+        raise InvalidInputError("Bind the model through its file runner first")
     directory = weights_dir
     tokenizer_path = directory / TOKENIZER_FILE
     if options.decoder_mode == "scaled_fp16" and not nax_available(mx):
@@ -1158,7 +1265,7 @@ def _run_linet(
     directory: Path,
     tokenizer_path: Path,
     mx: Mlx,
-    *, prepared: PreparedGeneration | None = None,
+    *, prepared: _Preparation | None = None,
 ) -> tuple[HostArray, HostArray | None, dict[str, object]]:
     """Generate the lesion image using the selected mask and attributes.
 
@@ -2604,8 +2711,10 @@ def _json_safe(value: object) -> object:
 
 __all__ = [
     "MODEL",
+    "LesionDiffusionModel",
     "LesionDiffusionOptions",
     "generate",
+    "load_model",
     "load_stage",
     "require_weights",
     "run_native_pipeline",

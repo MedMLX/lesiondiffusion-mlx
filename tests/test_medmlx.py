@@ -8,7 +8,7 @@ import shutil
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar, TypedDict, cast
 
 import numpy as np
 import pytest
@@ -566,11 +566,30 @@ def test_native_generation_is_finite_and_repeats_its_seed(
     assert np.any(first["mask"])
 
 
+class _Draw(TypedDict):
+    """Arguments of one loaded-model draw on the fixture CT and lesion mask."""
+
+    image_path: Path
+    organ_mask_path: Path
+    lesion_mask_path: Path
+    output_dir: Path
+    organ: str
+    lesion_type: str
+    placement: str
+    density: str
+    seed: int
+    output_region: str
+    inference_mode: str
+    decoder_mode: str
+    diffusion_steps: int
+    sampler: str
+
+
 @pytest.mark.parametrize(
     "inference_mode,decoder_mode",
     [("source", "reference"), ("conditioned", "reference"), ("conditioned", "scaled_fp16")],
 )
-def test_prepared_draws_preserve_independent_outputs_and_rng(
+def test_loaded_model_draws_match_one_shot_draws_and_rng(
     inference_mode: str,
     decoder_mode: str,
     scan: tuple[Path, Path],
@@ -580,41 +599,40 @@ def test_prepared_draws_preserve_independent_outputs_and_rng(
     tmp_path: Path,
     mx: Mlx,
 ) -> None:
-    """Repeated host preparation keeps pristine state, fresh conditions and RNG progression."""
+    """A loaded model's draws equal one-shot draws and keep RNG progression."""
     if decoder_mode == "scaled_fp16" and not nax_available(mx):
         pytest.skip("Scaled FP16 decoder requires NAX")
     _, _, lesion = cases.real_scan_data()
     lesion_path = tmp_path / "lesion.nii.gz"
     nib.save(nib.Nifti1Image(lesion, nib.load(scan[0]).affine), lesion_path)
-    arguments = _arguments(
-        scan,
-        tmp_path / "unused",
-        tiny_weights if inference_mode == "source" else conditioned_weights,
-        lesion_mask_path=lesion_path,
-        bbox_size_mm=None,
-        output_region="lesion",
-        inference_mode=inference_mode,
-        decoder_mode=decoder_mode,
-        diffusion_steps=2,
-        sampler="ddim" if inference_mode == "source" else "dpmpp_2m",
-    )
-    with medmlx.PreparedGeneration() as prepared:
+    weights = tiny_weights if inference_mode == "source" else conditioned_weights
+
+    def draw(output: str, seed: int = 11, density: str = "hypodense lesion") -> _Draw:
+        return {
+            "image_path": scan[0],
+            "organ_mask_path": scan[1],
+            "lesion_mask_path": lesion_path,
+            "output_dir": tmp_path / output,
+            "organ": "liver",
+            "lesion_type": "tumor",
+            "placement": "inside_parenchyma",
+            "density": density,
+            "seed": seed,
+            "output_region": "lesion",
+            "inference_mode": inference_mode,
+            "decoder_mode": decoder_mode,
+            "diffusion_steps": 2,
+            "sampler": "ddim" if inference_mode == "source" else "dpmpp_2m",
+        }
+
+    with medmlx.load_model(weights_path=weights) as model:
         for index, (seed, density) in enumerate(
             ((11, "hypodense lesion"), (19, "hyperdense lesion"))
         ):
-            results: list[medmlx.RunResult] = []
-            random: list[NumericArray] = []
-            for cache in (None, prepared):
-                request = {
-                    **arguments,
-                    "seed": seed,
-                    "density": density,
-                    "output_dir": tmp_path / f"draw-{index}-{cache is not None}",
-                    "prepared": cache,
-                }
-                result = run(**cast(cases.RunArguments, request))
-                results.append(result)
-                random.append(cast(NumericArray, np.array(mx.random.normal((17,)))))
+            results = [generate(**draw(f"draw-{index}-once", seed, density), weights_path=weights)]
+            random = [cast(NumericArray, np.array(mx.random.normal((17,))))]
+            results.append(model.generate(**draw(f"draw-{index}-loaded", seed, density)))
+            random.append(cast(NumericArray, np.array(mx.random.normal((17,)))))
             np.testing.assert_array_equal(random[0], random[1])
             for role, path in results[0]["outputs"].items():
                 np.testing.assert_array_equal(
@@ -624,14 +642,15 @@ def test_prepared_draws_preserve_independent_outputs_and_rng(
             stage = results[1]["details"]["stages"]["linet"]
             assert stage["prepared_encoder_reused"] is (index > 0)
             assert stage["prepared_reconstruction_reused"] is (index > 0)
-        # A new valid file path cannot silently reuse another host's preparation.
+        # A new valid file path cannot silently reuse another CT's preparation.
         replacement = tmp_path / "replacement.nii.gz"
         shutil.copyfile(scan[0], replacement)
-        changed = {**arguments, "image_path": replacement, "prepared": prepared}
-        with pytest.raises(InvalidInputError, match="PreparedGeneration inputs"):
-            run(**cast(cases.RunArguments, changed))
-    with pytest.raises(InvalidInputError, match="closed"):
-        run(**cast(cases.RunArguments, {**arguments, "prepared": prepared}))
+        changed = draw("changed")
+        changed["image_path"] = replacement
+        with pytest.raises(InvalidInputError, match="inputs, weights or execution modes"):
+            model.generate(**changed)
+    with pytest.raises(RuntimeError, match="closed"):
+        model.generate(**draw("closed"))
 
 
 @pytest.mark.parametrize("decoder_mode", ["reference", "scaled_fp16"])

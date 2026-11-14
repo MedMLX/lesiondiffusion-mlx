@@ -212,13 +212,15 @@ def generate(
     seed: int,
     conditioning_mean_hu: float | None = None,
     conditioner: ContextConditioner | None = None,
-    prepared: medmlx.PreparedGeneration | None = None,
+    model: medmlx.LesionDiffusionModel | None = None,
 ) -> GenerationRecord:
     """Generate CT in a clean host using the supplied placement mask unchanged.
 
     PreparedHost owns input geometry and clean-host provenance. This boundary
     checks public outputs for finite values, the prepared grid and mask identity.
     Caller-owned GPU locking spans generation and subsequent radiomics extraction.
+    A caller's ``model``, loaded from ``weights``, reuses the host's preparation
+    across draws; without one, this draw loads its own and releases it.
     """
     require_metal()
     output_dir = output_dir.resolve()
@@ -248,29 +250,32 @@ def generate(
     }
     _write_json(output_dir / "arguments.json", arguments)
     started = time.perf_counter()
-    with generation_context(controls, conditioning_mean_hu, conditioner):
-        result = medmlx.run(
-            image_path=host.image_path,
-            organ_mask_path=host.liver_mask_path,
-            lesion_mask_path=host.placement_mask_path,
-            output_dir=output_dir,
-            weights_path=weights,
-            organ="liver",
-            lesion_type="tumor",
-            placement="inside_parenchyma",
-            density=controls.density,
-            density_variation=controls.density_variation,
-            surface=controls.surface,
-            specific_features=controls.specific_features,
-            enhancement="enhanced CT",
-            diffusion_steps=controls.base_steps,
-            sampler="dpmpp_2m",
-            decoder_mode="reference",
-            inference_mode="conditioned",
-            output_region="lesion",
-            seed=seed,
-            prepared=prepared,
-        )
+    active = medmlx.load_model(weights_path=weights) if model is None else model
+    try:
+        with generation_context(controls, conditioning_mean_hu, conditioner):
+            result = active.generate(
+                image_path=host.image_path,
+                organ_mask_path=host.liver_mask_path,
+                lesion_mask_path=host.placement_mask_path,
+                output_dir=output_dir,
+                organ="liver",
+                lesion_type="tumor",
+                placement="inside_parenchyma",
+                density=controls.density,
+                density_variation=controls.density_variation,
+                surface=controls.surface,
+                specific_features=controls.specific_features,
+                enhancement="enhanced CT",
+                diffusion_steps=controls.base_steps,
+                sampler="dpmpp_2m",
+                decoder_mode="reference",
+                inference_mode="conditioned",
+                output_region="lesion",
+                seed=seed,
+            )
+    finally:
+        if model is None:
+            active.close()
     _write_json(output_dir / "result.json", result)
     for role, path in result["outputs"].items():
         image = _nifti.load(path)
@@ -281,7 +286,7 @@ def generate(
             raise ValueError(f"Generated {role} differs from the prepared host grid")
         if not np.isfinite(data).all():
             raise ValueError(f"Generated {role} contains non-finite values")
-        if role == "target_mask" and not np.array_equal(data, host.placement_mask):
+        if role == "mask" and not np.array_equal(data, host.placement_mask):
             raise ValueError("Generated lesion mask differs from the supplied placement mask")
     actual = result["details"]["stages"]["linet"]["diffusion_steps_actual"]
     if actual != controls.retained_steps:

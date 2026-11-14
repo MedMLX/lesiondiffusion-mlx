@@ -14,7 +14,7 @@ and `linet_diffusion_steps` can override the shared `diffusion_steps` value.
 The 200-step DDIM path remains the reference when these options are omitted.
 
 ```python
-from lesiondiffusion_mlx.medmlx import generate
+from lesiondiffusion_mlx import generate
 
 result = generate(
     image_path="ct.nii.gz",
@@ -407,6 +407,16 @@ output remained finite and retained distant anatomy exactly.
    loading and compilation cost justifies the retained memory.
 5. Evaluate distillation as model-quality research with multiple cases and
    seeds, rather than an equivalent scheduler rewrite.
+
+## Default-path parity with the previous release
+
+On a 184×184×52-voxel crop of HCC-TACE HCC_063 (CT, liver and tumor annotation; 0.86×0.86×2.5 mm,
+resampled to RAS 1 mm) with the released weights, the default call (DDIM, 200 steps, seed 23,
+`output_region="lesion"`, a 30×30×20 mm box inside the liver) wrote bit-identical `image`,
+`raw_image`, `mask` and `organ_mask` arrays on this version and on the preceding release. The
+DPM++ call (`sampler="dpmpp_2m"`, 10 steps) on the same input produced finite HU in [-1020, 853],
+a 5,849-voxel lesion (6,249 with DDIM) and a lesion mean of 57.7 HU (56.6 HU with DDIM); the
+masks overlap with Dice 0.65, as expected for a different sampling trajectory.
 
 ## Peak memory
 

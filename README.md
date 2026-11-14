@@ -40,7 +40,7 @@ uv pip install "lesiondiffusion-mlx>=0.2.8"
 ## Run
 
 ```python
-from lesiondiffusion_mlx.medmlx import generate
+from lesiondiffusion_mlx import generate
 
 result = generate(
     image_path="ct_1mm_ras.nii.gz",
@@ -86,15 +86,28 @@ required.
 | `output_region` | `"full"` (default), `"box"` or `"lesion"`; see below |
 | `weights_path` | Optional folder containing `model.safetensors` and `tokenizer.json` |
 | `overwrite` | `False` by default; existing outputs are never replaced |
-| `prepared` | Optional `PreparedGeneration` session for repeated draws with the same CT and supplied lesion mask |
 
-For repeated seeds or phenotype controls on one supplied lesion outline, use
-`with PreparedGeneration() as prepared:` from `lesiondiffusion_mlx.medmlx` and pass
-`prepared=prepared` to each `run` call. The session retains validated geometry,
-the pristine encoded latent and the unmodified reconstruction for lesion output.
-Each draw builds fresh text conditioning and sampler state. Input files, weights,
-preprocessing mode, decoder mode and output region must stay fixed; the context
-manager releases the cached arrays when the host is finished.
+For repeated seeds or phenotype controls on one supplied lesion outline, load the
+model once. Its `generate` takes the same arguments without `weights_path`, the box
+and the anatomy map, and returns what the one-shot call would:
+
+```python
+from lesiondiffusion_mlx import load_model
+
+with load_model() as model:
+    for seed in (1, 2, 3):
+        model.generate(
+            image_path="ct.nii.gz", organ_mask_path="liver.nii.gz",
+            lesion_mask_path="lesion.nii.gz", output_dir=f"out/seed-{seed}",
+            organ="liver", lesion_type="tumor", placement="inside_parenchyma",
+            output_region="lesion", seed=seed,
+        )
+```
+
+The model keeps the validated geometry, the encoded CT latent and, for lesion
+output, the unmodified reconstruction; each draw builds fresh text conditioning and
+sampler state. The CT, masks, weights, organ, inference mode, decoder mode and
+output region stay fixed after the first draw.
 
 To keep 200-step mask generation and use 50-step CT inpainting, pass
 `lmnet_diffusion_steps=200, linet_diffusion_steps=50`. Changing the inpainting
@@ -148,9 +161,11 @@ it shifts attenuation by several HU, by an amount that depends on the volume.
 | `"lesion"` | Also decodes the unchanged input, and adds only the difference between the two decodes to the input CT, within 33 voxels of the lesion along each axis. The shift cancels, and voxels farther away are the input unchanged. Use it when the surrounding anatomy should keep its measured values |
 
 `"box"` and `"lesion"` also write the full reconstruction as `raw_synthetic_ct.nii.gz`.
-`generate` returns `{"outputs": {...}, "details": {...}}`, with run metadata in `details`.
-Invalid inputs raise `InvalidInputError`; missing or mismatched weights raise
-`AssetNotReadyError`. Synthetic output is not ground truth.
+`generate` returns `{"outputs": {...}, "artifacts": {...}, "details": {...}}`. The output
+roles are `image`, `mask` and `organ_mask`, plus `raw_image` for `"box"` and `"lesion"`;
+`artifacts` describes each file and `details` holds run metadata.
+Invalid inputs raise `InvalidInputError`; missing
+or mismatched weights raise `AssetNotReadyError`. Synthetic output is not ground truth.
 
 ### Inference modes
 

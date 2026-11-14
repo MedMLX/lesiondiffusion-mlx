@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TypedDict
 
 import numpy as np
-from lesiondiffusion_mlx.medmlx import PreparedGeneration
+from lesiondiffusion_mlx.medmlx import LesionDiffusionModel
 from numpy.typing import NDArray
 from scipy.optimize import differential_evolution
 
@@ -180,9 +180,7 @@ def match_reference(
             seed=seed,
             conditioning_mean_hu=_condition(profile.target_space, profile.target_mean_hu, host),
         )
-        features = extract_generated_features(
-            profile, host, Path(generated["outputs"]["synthetic_image"])
-        )
+        features = extract_generated_features(profile, host, Path(generated["outputs"]["image"]))
         comparison = compare_features(profile, features)
         score = float(comparison["score"])
         if not np.isfinite(score):
@@ -306,7 +304,7 @@ def sample_reference(
     seed: int,
     adapter: Path | None = None,
     adapter_gain: float = 1.0,
-    prepared: PreparedGeneration | None = None,
+    model: LesionDiffusionModel | None = None,
 ) -> SampleRecord:
     """Generate one measured reference-conditioned lesion with an optional trained MLP.
 
@@ -334,11 +332,9 @@ def sample_reference(
         seed=seed,
         conditioning_mean_hu=_condition(profile.target_space, profile.target_mean_hu, host),
         conditioner=conditioner,
-        prepared=prepared,
+        model=model,
     )
-    features = extract_generated_features(
-        profile, host, Path(generated["outputs"]["synthetic_image"])
-    )
+    features = extract_generated_features(profile, host, Path(generated["outputs"]["image"]))
     comparison = compare_features(profile, features)
     save_profile(profile, output_dir / "reference_profile.json")
     (output_dir / "features.json").write_text(json.dumps(features, indent=2) + "\n")
