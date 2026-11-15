@@ -126,9 +126,9 @@ overflow; half rounding changes decoded HU. It requires NAX on an M5-class GPU.
 Native generation in this mode caps MLX's free-buffer cache at 4 GiB, respects
 an existing tighter limit and restores the caller's limit afterward.
 `decoder_mode="reference"` keeps conditioned decoding in FP32. Numerical results
-and measurements are in [the technical notes](docs/technical.md).
+and measurements are in [the technical notes](https://github.com/MedMLX/lesiondiffusion-mlx/blob/main/docs/technical.md).
 
-[LesionControl](research/lesioncontrol/README.md) adds reference-conditioned
+[LesionControl](https://github.com/MedMLX/lesiondiffusion-mlx/blob/main/research/lesioncontrol/README.md) adds reference-conditioned
 radiomics profiles, bounded control search and a learned context adapter. Its
 research code includes real-HCC adapter training and paired-seed evaluation;
 it has a separate environment under `research/lesioncontrol`.

@@ -1,6 +1,6 @@
 """Prepare source-provenanced real HCC crops within a frozen patient subdivision.
 
-The existing TALON catalog owns CT/SEG pairing and the Radium outline table owns
+An external case catalog supplies CT/SEG pairing and an outline table supplies
 26-connected component identity. NiBabel performs the same 128³, 1 mm RAS linear
 CT and nearest-label resampling as the existing appearance experiment. CT is
 explicitly float32 before interpolation: integer output would round interpolated
