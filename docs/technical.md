@@ -14,9 +14,9 @@ and `linet_diffusion_steps` can override the shared `diffusion_steps` value.
 The 200-step DDIM path remains the reference when these options are omitted.
 
 ```python
-from lesiondiffusion_mlx import generate
+from lesiondiffusion_mlx import run
 
-result = generate(
+result = run(
     image_path="ct.nii.gz",
     organ_mask_path="liver.nii.gz",
     weights_path="weights",

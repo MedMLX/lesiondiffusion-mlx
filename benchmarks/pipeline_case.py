@@ -50,7 +50,7 @@ def _case(variant: str) -> dict[str, object]:
     from baseline import baseline_execution
     from pipeline import runtime_diagnostics, source_patch
 
-    from lesiondiffusion_mlx.medmlx import generate as run
+    from lesiondiffusion_mlx.medmlx import run
 
     image = Path(os.environ["LESION_BENCH_IMAGE"])
     organ_mask = Path(os.environ["LESION_BENCH_ORGAN_MASK"])

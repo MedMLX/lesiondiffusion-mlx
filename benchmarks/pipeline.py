@@ -170,7 +170,7 @@ def main() -> None:
     from baseline import baseline_execution
     from components import capture_components, save_arrays
 
-    from lesiondiffusion_mlx.medmlx import generate as run
+    from lesiondiffusion_mlx.medmlx import run
 
     root = Path(__file__).resolve().parents[1]
     revision = subprocess.check_output(

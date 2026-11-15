@@ -21,7 +21,7 @@ from lesiondiffusion_mlx._arrays import BoolArray, FloatArray, HostArray, Numeri
 from lesiondiffusion_mlx._nax_conv import nax_available
 from lesiondiffusion_mlx._nifti import nib
 from lesiondiffusion_mlx._typing import ArrayConstructor
-from lesiondiffusion_mlx.medmlx import generate
+from lesiondiffusion_mlx.medmlx import run
 from lesiondiffusion_mlx.mlx_model import UnetConfig, VqAutoencoder
 from lesiondiffusion_mlx.mlx_sampling import DdimSampler
 from tests import _runner_cases as cases
@@ -318,7 +318,7 @@ def test_invalid_arguments_fail_before_downloading_weights(
     arguments = _arguments(scan, output, tmp_path, **{**overrides, **paths})
     arguments.pop("weights_path")
     with pytest.raises(InvalidInputError):
-        generate(**arguments)
+        run(**arguments)
     if existing is not None and existing.startswith("dangling:"):
         assert (output / existing.removeprefix("dangling:")).is_symlink()
 
@@ -329,7 +329,7 @@ def test_missing_or_mismatched_weights_raise_asset_not_ready(
     """Report a missing folder, file or stage, and an unreadable bundle, as asset errors."""
     output = tmp_path / "out"
     with pytest.raises(AssetNotReadyError):
-        generate(**_arguments(scan, output, tmp_path / "absent"))
+        run(**_arguments(scan, output, tmp_path / "absent"))
 
     def copy(name: str) -> Path:
         """Copy fixture weights into a named temporary directory."""
@@ -339,19 +339,19 @@ def test_missing_or_mismatched_weights_raise_asset_not_ready(
     weights = copy("missing_safetensors")
     (weights / "model.safetensors").unlink()
     with pytest.raises(AssetNotReadyError):
-        generate(**_arguments(scan, output, weights))
+        run(**_arguments(scan, output, weights))
     weights = copy("no_linet_text")
     packed = load_safe(str(weights / "model.safetensors"))
     kept = {key: value for key, value in packed.items() if not key.startswith("linet_text.")}
     save_safe(kept, str(weights / "model.safetensors"))
     with pytest.raises(AssetNotReadyError):
-        generate(**_arguments(scan, output, weights, inference_mode="conditioned"))
+        run(**_arguments(scan, output, weights, inference_mode="conditioned"))
     # Source mode does not condition LINet on text.
     assert medmlx.require_weights(weights, inference_mode="source") == weights
     weights = copy("corrupt_safetensors")
     (weights / "model.safetensors").write_bytes(b"not a safetensors header")
     with pytest.raises(AssetNotReadyError):
-        generate(**_arguments(scan, output, weights))
+        run(**_arguments(scan, output, weights))
 
 
 @pytest.fixture
@@ -435,7 +435,7 @@ def test_run_matches_upstream_end_to_end(
     monkeypatch.setattr(medmlx.time, "monotonic_ns", lambda: 0)
     (output / f".lesiondiffusion-{os.getpid()}-0-mask.nii.gz").symlink_to(victim)
 
-    result = generate(**_arguments(scan, output, tiny_weights))
+    result = run(**_arguments(scan, output, tiny_weights))
     assert victim.read_bytes() == b"original"
     images = {role: nib.load(path) for role, path in result["outputs"].items()}
     assert set(images) == {"image", "mask", "organ_mask"}
@@ -525,7 +525,7 @@ def test_native_generation_is_finite_and_repeats_its_seed(
         name: str, *, lmnet_steps: int | None = None, linet_steps: int | None = None
     ) -> tuple[dict[str, NumericArray], medmlx.RunDetails]:
         """Run conditioned generation and read every written role."""
-        result = generate(
+        result = run(
             **_arguments(
                 scan,
                 tmp_path / name,
@@ -629,9 +629,9 @@ def test_loaded_model_draws_match_one_shot_draws_and_rng(
         for index, (seed, density) in enumerate(
             ((11, "hypodense lesion"), (19, "hyperdense lesion"))
         ):
-            results = [generate(**draw(f"draw-{index}-once", seed, density), weights_path=weights)]
+            results = [run(**draw(f"draw-{index}-once", seed, density), weights_path=weights)]
             random = [cast(NumericArray, np.array(mx.random.normal((17,))))]
-            results.append(model.generate(**draw(f"draw-{index}-loaded", seed, density)))
+            results.append(model.run(**draw(f"draw-{index}-loaded", seed, density)))
             random.append(cast(NumericArray, np.array(mx.random.normal((17,)))))
             np.testing.assert_array_equal(random[0], random[1])
             for role, path in results[0]["outputs"].items():
@@ -648,9 +648,9 @@ def test_loaded_model_draws_match_one_shot_draws_and_rng(
         changed = draw("changed")
         changed["image_path"] = replacement
         with pytest.raises(InvalidInputError, match="inputs, weights or execution modes"):
-            model.generate(**changed)
+            model.run(**changed)
     with pytest.raises(RuntimeError, match="closed"):
-        model.generate(**draw("closed"))
+        model.run(**draw("closed"))
 
 
 @pytest.mark.parametrize("decoder_mode", ["reference", "scaled_fp16"])
@@ -667,7 +667,7 @@ def test_dpm_solver_runs_both_conditioned_stages_with_exact_call_counts(
         pytest.skip("Scaled FP16 decoding requires enabled NAX")
     previous = mx.set_cache_limit(8 << 30)
     try:
-        result = generate(
+        result = run(
             **_arguments(
                 scan,
                 tmp_path / "dpm",
@@ -731,7 +731,7 @@ def test_scaled_decoder_restores_cache_limit_after_native_failure(
     previous = mx.set_cache_limit(preset)
     try:
         with pytest.raises(ModelExecutionError, match="injected encoder failure"):
-            generate(
+            run(
                 **_arguments(
                     scan,
                     tmp_path / "failed",

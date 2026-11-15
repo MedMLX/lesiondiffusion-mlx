@@ -40,9 +40,9 @@ uv pip install "lesiondiffusion-mlx>=0.2.8"
 ## Run
 
 ```python
-from lesiondiffusion_mlx import generate
+from lesiondiffusion_mlx import run
 
-result = generate(
+result = run(
     image_path="ct_1mm_ras.nii.gz",
     organ_mask_path="liver_mask.nii.gz",
     output_dir="out",
@@ -88,7 +88,7 @@ required.
 | `overwrite` | `False` by default; existing outputs are never replaced |
 
 For repeated seeds or phenotype controls on one supplied lesion outline, load the
-model once. Its `generate` takes the same arguments without `weights_path`, the box
+model once. Its `run` takes the same arguments without `weights_path`, the box
 and the anatomy map, and returns what the one-shot call would:
 
 ```python
@@ -96,7 +96,7 @@ from lesiondiffusion_mlx import load_model
 
 with load_model() as model:
     for seed in (1, 2, 3):
-        model.generate(
+        model.run(
             image_path="ct.nii.gz", organ_mask_path="liver.nii.gz",
             lesion_mask_path="lesion.nii.gz", output_dir=f"out/seed-{seed}",
             organ="liver", lesion_type="tumor", placement="inside_parenchyma",
@@ -161,7 +161,7 @@ it shifts attenuation by several HU, by an amount that depends on the volume.
 | `"lesion"` | Also decodes the unchanged input, and adds only the difference between the two decodes to the input CT, within 33 voxels of the lesion along each axis. The shift cancels, and voxels farther away are the input unchanged. Use it when the surrounding anatomy should keep its measured values |
 
 `"box"` and `"lesion"` also write the full reconstruction as `raw_synthetic_ct.nii.gz`.
-`generate` returns `{"outputs": {...}, "artifacts": {...}, "details": {...}}`. The output
+`run` returns `{"outputs": {...}, "artifacts": {...}, "details": {...}}`. The output
 roles are `image`, `mask` and `organ_mask`, plus `raw_image` for `"box"` and `"lesion"`;
 `artifacts` describes each file and `details` holds run metadata.
 Invalid inputs raise `InvalidInputError`; missing

@@ -253,7 +253,7 @@ def generate(
     active = medmlx.load_model(weights_path=weights) if model is None else model
     try:
         with generation_context(controls, conditioning_mean_hu, conditioner):
-            result = active.generate(
+            result = active.run(
                 image_path=host.image_path,
                 organ_mask_path=host.liver_mask_path,
                 lesion_mask_path=host.placement_mask_path,

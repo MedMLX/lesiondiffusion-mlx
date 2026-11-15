@@ -1,6 +1,6 @@
 """MedMLX file runner for the pinned upstream LMNet and LINet pipeline.
 
-``generate`` takes a CT and an organ mask as NIfTI files, standardizes them to a RAS 1 mm
+``run`` takes a CT and an organ mask as NIfTI files, standardizes them to a RAS 1 mm
 grid, and writes a CT with one synthetic lesion plus the lesion and organ masks. The
 lesion shape comes from LMNet, or from a supplied lesion mask that LINet inpaints
 directly. The helpers below it cover weight loading, option parsing, geometry, box
@@ -125,7 +125,7 @@ MODEL: Final[dict[str, str | float]] = {
     "id": MODEL_ID,
     "label": "LesionDiffusion CT lesion insertion",
     "task": "generation",
-    "run": "lesiondiffusion_mlx.medmlx:generate",
+    "run": "lesiondiffusion_mlx.medmlx:run",
     "summary": (
         "Insert one phenotype-controlled synthetic lesion into a CT, given a binary organ "
         "mask, or inpaint a supplied binary lesion mask. Outputs use a RAS 1 mm grid."
@@ -232,7 +232,7 @@ class RunDetails(TypedDict):
     warning: str
 
 
-# Return value of ``lesiondiffusion_mlx.generate``: ``outputs`` maps ``image``,
+# Return value of ``lesiondiffusion_mlx.run``: ``outputs`` maps ``image``,
 # ``mask`` and ``organ_mask`` (plus ``raw_image`` when ``output_region``
 # is ``"box"`` or ``"lesion"``) to file paths; ``artifacts`` describes each file.
 type RunResult = _RunResult[RunDetails]
@@ -253,7 +253,7 @@ class LesionDiffusionOptions:
     the cavity phrase in the text. ``shape`` through ``specific_features`` are free
     text for the upstream report. ``seed`` (0 to 2**32 - 1) seeds MT19937 box placement
     and MLX sampling. ``inference_mode`` is ``"conditioned"`` or ``"source"`` and
-    ``output_region`` is ``"full"``, ``"box"`` or ``"lesion"``; see ``generate``.
+    ``output_region`` is ``"full"``, ``"box"`` or ``"lesion"``; see ``run``.
     Each optional stage step count overrides ``diffusion_steps`` for that stage.
     ``sampler="ddim"`` retains upstream sampling; ``"dpmpp_2m"`` selects the
     deterministic alternative in conditioned mode.
@@ -430,7 +430,7 @@ class _Preparation:
         self._identity = identity
 
 
-def generate(
+def run(
     *,
     image_path: _PathArg,
     organ_mask_path: _PathArg,
@@ -604,12 +604,12 @@ def generate(
 class LesionDiffusionModel:
     """Repeated LesionDiffusion draws on one CT and supplied lesion mask.
 
-    The first :meth:`generate` call binds the CT, organ mask, lesion mask, weights,
+    The first :meth:`run` call binds the CT, organ mask, lesion mask, weights,
     organ, inference mode, decoder mode and output region, and keeps the validated
     geometry, the pristine encoded latent and, for ``output_region="lesion"``, the
     unmodified reconstruction. Each later draw builds fresh text conditioning,
     sampler history and RNG state from its own arguments, so its outputs equal those
-    of :func:`generate` with the same arguments. Seeds, phenotype text, LINet steps
+    of :func:`run` with the same arguments. Seeds, phenotype text, LINet steps
     and the sampler may change between draws. Draws run one at a time.
     """
 
@@ -618,7 +618,7 @@ class LesionDiffusionModel:
         self._folder = weights_dir(MODEL_ID) if weights_path is None else weights_path
         self._preparation: _Preparation | None = _Preparation()
 
-    def generate(
+    def run(
         self,
         *,
         image_path: _PathArg,
@@ -644,13 +644,13 @@ class LesionDiffusionModel:
         output_region: str = DEFAULT_OUTPUT_REGION,
         overwrite: bool = False,
     ) -> RunResult:
-        """Draw one lesion into the bound CT; see :func:`generate` for each argument.
+        """Draw one lesion into the bound CT; see :func:`run` for each argument.
 
         LMNet does not run because the lesion mask is supplied, so the box and
         anatomy arguments are absent.
 
         Raises:
-            InvalidInputError: As :func:`generate`, or a bound input, weight file or
+            InvalidInputError: As :func:`run`, or a bound input, weight file or
                 mode differs from the first draw's.
             RuntimeError: The model is closed.
         """
@@ -687,7 +687,7 @@ class LesionDiffusionModel:
         )
 
     def close(self) -> None:
-        """Release the retained preparation; later :meth:`generate` calls raise."""
+        """Release the retained preparation; later :meth:`run` calls raise."""
         self._preparation = None
 
     def __enter__(self) -> Self:
@@ -702,7 +702,7 @@ class LesionDiffusionModel:
 def load_model(*, weights_path: _PathArg | None = None) -> LesionDiffusionModel:
     """Return a model for repeated draws on one CT and supplied lesion mask.
 
-    ``weights_path`` has the meaning it has in :func:`generate`. Close the model, or
+    ``weights_path`` has the meaning it has in :func:`run`. Close the model, or
     use it as a context manager, to release the retained arrays.
     """
     return LesionDiffusionModel(weights_path=weights_path)
@@ -2358,7 +2358,7 @@ def materialize_arrays(
         geometry: Standardized inputs; ``output_reference`` defines the written grid.
         image_data: Generated CT (HU) on the even-padded grid.
         lesion_data: Label map on the same grid; 2 marks the lesion.
-        output_region: ``"full"``, ``"box"`` or ``"lesion"``; see ``generate``.
+        output_region: ``"full"``, ``"box"`` or ``"lesion"``; see ``run``.
         input_reconstruction: Decode of the unmodified input latent on the same grid;
             required for, and only used by, ``output_region="lesion"``.
 
@@ -2713,10 +2713,10 @@ __all__ = [
     "MODEL",
     "LesionDiffusionModel",
     "LesionDiffusionOptions",
-    "generate",
     "load_model",
     "load_stage",
     "require_weights",
+    "run",
     "run_native_pipeline",
     "select_lesion_component",
     "source_organ_label",

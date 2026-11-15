@@ -9,8 +9,8 @@ if TYPE_CHECKING:
     from lesiondiffusion_mlx._schedules import (
         lesion_diffusion_timesteps as lesion_diffusion_timesteps,
     )
-    from lesiondiffusion_mlx.medmlx import generate as generate
     from lesiondiffusion_mlx.medmlx import load_model as load_model
+    from lesiondiffusion_mlx.medmlx import run as run
     from lesiondiffusion_mlx.mlx_model import (
         LINET_CONFIG as LINET_CONFIG,
     )
@@ -45,9 +45,9 @@ __all__ = [
     "SourceLayers",
     "UnetConfig",
     "VqAutoencoder",
-    "generate",
     "lesion_diffusion_timesteps",
     "load_model",
+    "run",
 ]
 
 
@@ -57,7 +57,7 @@ def __getattr__(name: str) -> object:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     module = (
         "medmlx"
-        if name in {"generate", "load_model"}
+        if name in {"run", "load_model"}
         else "_schedules"
         if name == "lesion_diffusion_timesteps"
         else "mlx_sampling"
