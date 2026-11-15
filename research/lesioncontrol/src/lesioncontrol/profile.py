@@ -194,7 +194,7 @@ def _ring(mask: Mask, liver: Mask) -> Mask:
 def extract_features(image: FloatImage, mask: Mask, settings: Settings) -> dict[str, float]:
     """Extract finite ROI features with public MLXRadiomics on Metal at 1 mm spacing."""
     import mlx.core as mx
-    from mlxradiomics import run
+    from mlxradiomics import extract
 
     if not mx.metal.is_available():
         raise RuntimeError("LesionControl feature extraction requires MLX Metal")
@@ -203,7 +203,7 @@ def extract_features(image: FloatImage, mask: Mask, settings: Settings) -> dict[
     if not np.isfinite(image).all() or not mask.any():
         raise ValueError("Feature extraction requires finite CT and a nonempty mask")
     mx.set_default_device(mx.gpu)
-    result = run(image, mask, settings=settings, spacing=(1.0, 1.0, 1.0), mode="roi")
+    result = extract(image, mask, settings=settings, spacing=(1.0, 1.0, 1.0), mode="roi")
     return _feature_values(result.features, settings)
 
 
