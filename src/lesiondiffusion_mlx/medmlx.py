@@ -212,8 +212,8 @@ class RunDetails(TypedDict):
     warning: str
 
 
-# Return value of ``lesiondiffusion_mlx.generate``: ``outputs`` maps ``synthetic_image``,
-# ``target_mask`` and ``organ_mask`` (plus ``raw_synthetic_image`` when ``output_region``
+# Return value of ``lesiondiffusion_mlx.generate``: ``outputs`` maps ``image``,
+# ``mask`` and ``organ_mask`` (plus ``raw_image`` when ``output_region``
 # is ``"box"`` or ``"lesion"``) to file paths; ``artifacts`` describes each file.
 type RunResult = _RunResult[RunDetails]
 
@@ -424,20 +424,20 @@ def generate(
             the encoded volume. ``"box"`` keeps the generated CT over the box, widened
             to the lesion's bounding box when the lesion extends past it, feathers that
             region into the input CT over ``LOCALIZATION_MARGIN_MM``, and writes the
-            full reconstruction as ``raw_synthetic_image``. Outside the blend region it
+            full reconstruction as ``raw_image``. Outside the blend region it
             retains the standardized input cast to float32, which can round
             higher-precision input. The lesion mask is not clipped; every lesion voxel
             lies in the kept region. ``"lesion"`` decodes the unmodified input latent
             as well and adds only the lesion's change to the input CT (see
             ``apply_lesion_change``), so the autoencoder's offset does not reach the
-            output. It also writes ``raw_synthetic_image``.
+            output. It also writes ``raw_image``.
         overwrite: Replace existing output files instead of refusing. Failed final
             file moves restore the prior output set; abrupt process termination during
             publication can still leave partial outputs.
 
     Returns:
-        ``{"outputs": ..., "details": ...}``. ``synthetic_image`` is float32 HU;
-        ``target_mask`` and ``organ_mask`` are uint8 with value 1 for lesion and
+        ``{"outputs": ..., "details": ...}``. ``image`` is float32 HU;
+        ``mask`` and ``organ_mask`` are uint8 with value 1 for lesion and
         organ. All keep the standardized grid's affine, qform and sform.
 
     Raises:
@@ -635,24 +635,20 @@ def _run_result(
         "stages": stages,
         "output_region": options.output_region,
         "output_kind_by_role": {
-            "synthetic_image": "synthetic_image",
-            "target_mask": "label_map",
+            "image": "synthetic_image",
+            "mask": "label_map",
             "organ_mask": "label_map",
-            **(
-                {"raw_synthetic_image": "synthetic_image"}
-                if "raw_synthetic_image" in outputs
-                else {}
-            ),
+            **({"raw_image": "synthetic_image"} if "raw_image" in outputs else {}),
         },
         "output_shape_by_role": {role: grid for role in outputs},
         "output_dtype_by_role": {
-            "synthetic_image": "float32",
-            "target_mask": "uint8",
+            "image": "float32",
+            "mask": "uint8",
             "organ_mask": "uint8",
-            **({"raw_synthetic_image": "float32"} if "raw_synthetic_image" in outputs else {}),
+            **({"raw_image": "float32"} if "raw_image" in outputs else {}),
         },
         "output_labels_by_role": {
-            "target_mask": [{"name": options.lesion_type, "value": 1}],
+            "mask": [{"name": options.lesion_type, "value": 1}],
             "organ_mask": [{"name": options.organ, "value": geometry.organ_label}],
         },
         "weights_path": directory.as_posix(),
@@ -663,10 +659,8 @@ def _run_result(
         "warning": WARNING,
     }
     artifacts = {
-        "synthetic_image": artifact(
-            kind="synthetic_image", coordinate_space="image_physical", units="HU"
-        ),
-        "target_mask": artifact(
+        "image": artifact(kind="synthetic_image", coordinate_space="image_physical", units="HU"),
+        "mask": artifact(
             kind="label_map",
             coordinate_space="image_physical",
             labels=[{"value": 1, "name": options.lesion_type}],
@@ -677,8 +671,8 @@ def _run_result(
             labels=[{"value": geometry.organ_label, "name": options.organ}],
         ),
     }
-    if "raw_synthetic_image" in outputs:
-        artifacts["raw_synthetic_image"] = artifact(
+    if "raw_image" in outputs:
+        artifacts["raw_image"] = artifact(
             kind="synthetic_image", coordinate_space="image_physical", units="HU"
         )
     return {
@@ -1654,7 +1648,7 @@ def prepare_lesion_mask(
 ) -> tuple[BoolArray, dict[str, object]]:
     """Load a supplied binary lesion mask that replaces LMNet's output.
 
-    The file uses the runner's ``target_mask`` encoding, 0 background and 1 lesion, and
+    The file uses the runner's ``mask`` encoding, 0 background and 1 lesion, and
     is standardized like the organ mask (RAS 1 mm, nearest neighbor, zero padding to
     even extents) onto the CT's grid. Upstream LINet reads lesion label 2 of LMNet's
     label map and ignores its organ label 1; this runner hands LINet the boolean
@@ -1948,7 +1942,7 @@ def materialize_arrays(
 
     In ``box`` mode the generated CT is kept over the smallest box containing both
     the requested box and the lesion (which LMNet does not confine to the box), so
-    every voxel of ``target_mask`` lies on generated intensities. For a supplied
+    every voxel of ``mask`` lies on generated intensities. For a supplied
     lesion mask that is the derived box itself.
 
     Args:
@@ -1982,7 +1976,7 @@ def materialize_arrays(
     lesion = (lesion_data[_input_grid(geometry.output_reference)] == 2).astype(np.uint8)
     if not np.any(lesion):
         raise ModelExecutionError("LesionDiffusion mask output does not contain lesion label 2")
-    images: list[tuple[HostArray, str]] = [(image_data, "synthetic_image")]
+    images: list[tuple[HostArray, str]] = [(image_data, "image")]
     compositing: dict[str, object] | None = None
     if output_region == "box":
         box = cast(
@@ -2018,7 +2012,7 @@ def materialize_arrays(
             "start_voxel": [int(part.start) for part in box],
             "stop_voxel_exclusive": [int(part.stop) for part in box],
         }
-        images = [(localized, "synthetic_image"), (image_data, "raw_synthetic_image")]
+        images = [(localized, "image"), (image_data, "raw_image")]
     elif output_region == "lesion":
         localized, compositing = apply_lesion_change(
             original=geometry.source_data,
@@ -2026,14 +2020,14 @@ def materialize_arrays(
             reconstruction=cast(NumericArray, input_reconstruction),
             lesion=lesion_data == 2,
         )
-        images = [(localized, "synthetic_image"), (image_data, "raw_synthetic_image")]
+        images = [(localized, "image"), (image_data, "raw_image")]
     organ = np.where(geometry.organ_mask, geometry.organ_label, 0).astype(np.uint8)
     writes: list[tuple[HostArray, str, type[np.generic]]] = [
         *((data, role, np.float32) for data, role in images),
-        (lesion, "target_mask", np.uint8),
+        (lesion, "mask", np.uint8),
         (organ, "organ_mask", np.uint8),
     ]
-    directory = outputs["synthetic_image"].parent
+    directory = outputs["image"].parent
     directory.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(prefix=".lesiondiffusion-", dir=directory) as staging:
         staged = {role: Path(staging) / outputs[role].name for _, role, _ in writes}
@@ -2056,9 +2050,7 @@ def materialize_arrays(
 
 def _publish_outputs(staged: Mapping[str, Path], outputs: Mapping[str, Path]) -> None:
     """Restore the prior output set if any staged file cannot be published."""
-    recovery = Path(
-        mkdtemp(prefix=".lesiondiffusion-backup-", dir=outputs["synthetic_image"].parent)
-    )
+    recovery = Path(mkdtemp(prefix=".lesiondiffusion-backup-", dir=outputs["image"].parent))
     cleanup = True
     try:
         backups: dict[Path, Path] = {}
@@ -2117,14 +2109,14 @@ def _input_grid(reference: NiftiImage) -> tuple[slice, ...]:
 
 
 def output_paths(output: Path, output_region: str = DEFAULT_OUTPUT_REGION) -> dict[str, Path]:
-    """Map each output role to its file; ``box`` and ``lesion`` add ``raw_synthetic_image``."""
+    """Map each output role to its file; ``box`` and ``lesion`` add ``raw_image``."""
     paths = {
-        "synthetic_image": output / _SYNTHETIC_CT,
-        "target_mask": output / _LESION_MASK,
+        "image": output / _SYNTHETIC_CT,
+        "mask": output / _LESION_MASK,
         "organ_mask": output / _ORGAN_MASK,
     }
     if output_region in {"box", "lesion"}:
-        paths["raw_synthetic_image"] = output / _RAW_SYNTHETIC_CT
+        paths["raw_image"] = output / _RAW_SYNTHETIC_CT
     return paths
 
 

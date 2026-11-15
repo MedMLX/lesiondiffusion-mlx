@@ -380,29 +380,29 @@ def test_run_matches_upstream_end_to_end(
     victim = tmp_path / "victim.nii.gz"
     victim.write_bytes(b"original")
     monkeypatch.setattr(medmlx.time, "monotonic_ns", lambda: 0)
-    (output / f".lesiondiffusion-{os.getpid()}-0-target_mask.nii.gz").symlink_to(victim)
+    (output / f".lesiondiffusion-{os.getpid()}-0-mask.nii.gz").symlink_to(victim)
 
     result = generate(**_arguments(scan, output, tiny_weights))
     assert victim.read_bytes() == b"original"
     images = {role: nib.load(path) for role, path in result["outputs"].items()}
-    assert set(images) == {"synthetic_image", "target_mask", "organ_mask"}
+    assert set(images) == {"image", "mask", "organ_mask"}
     checked = validate_outputs(result)
     assert {role: entry["kind"] for role, entry in checked.artifacts.items()} == {
-        "synthetic_image": "synthetic_image",
-        "target_mask": "label_map",
+        "image": "synthetic_image",
+        "mask": "label_map",
         "organ_mask": "label_map",
     }
     source = nib.load(scan[0])
     for image in images.values():
         assert image.shape == source.shape
         assert np.array_equal(image.affine, source.affine)
-    actual = cast(NumericArray, np.asanyarray(images["synthetic_image"].dataobj))
+    actual = cast(NumericArray, np.asanyarray(images["image"].dataobj))
     # Fixed upstream quantized input isolates native VQ decoding and HU writing.
     # The decoder's 0.002 normalized absolute bound maps to at most 8 HU.
     # Native generation is exercised separately below: nearest-code switches make
     # a uniform HU bound invalid for independently computed latents.
     np.testing.assert_allclose(actual, cast(NumericArray, fixture["output"]), atol=8, rtol=0)
-    assert np.array_equal(np.asanyarray(images["target_mask"].dataobj), fixture["lesion"])
+    assert np.array_equal(np.asanyarray(images["mask"].dataobj), fixture["lesion"])
     assert np.array_equal(np.asanyarray(images["organ_mask"].dataobj), cases.organ_block())
 
 
@@ -437,15 +437,13 @@ def test_output_publication_restores_all_roles_after_move_failure(
     victim = tmp_path / "victim.nii.gz"
     if preexisting == "symlink":
         victim.write_bytes(b"outside")
-        outputs["synthetic_image"].unlink()
-        outputs["synthetic_image"].symlink_to(victim)
+        outputs["image"].unlink()
+        outputs["image"].symlink_to(victim)
 
     replace = Path.replace
 
     def fail_second_move(source: Path, destination: Path) -> Path:
-        if destination == outputs["target_mask"] and source.parent.name.startswith(
-            ".lesiondiffusion-"
-        ):
+        if destination == outputs["mask"] and source.parent.name.startswith(".lesiondiffusion-"):
             raise OSError("injected final move failure")
         return replace(source, destination)
 
@@ -456,7 +454,7 @@ def test_output_publication_restores_all_roles_after_move_failure(
         )
 
     for role, path in outputs.items():
-        if preexisting == "symlink" and role == "synthetic_image":
+        if preexisting == "symlink" and role == "image":
             assert path.is_symlink() and path.resolve() == victim
             assert victim.read_bytes() == b"outside"
         elif preexisting != "none":
@@ -483,9 +481,9 @@ def test_native_generation_is_finite_and_repeats_its_seed(
     first, again = draw("first"), draw("again")
     for role, actual in first.items():
         np.testing.assert_array_equal(actual, again[role])
-    image = first["synthetic_image"]
+    image = first["image"]
     assert image.dtype == np.float32 and np.isfinite(image).all()
     assert image.min() >= -1000 and image.max() <= 1000
-    assert first["target_mask"].dtype == np.uint8
-    assert set(np.unique(first["target_mask"])) <= {0, 1}
-    assert np.any(first["target_mask"])
+    assert first["mask"].dtype == np.uint8
+    assert set(np.unique(first["mask"])) <= {0, 1}
+    assert np.any(first["mask"])

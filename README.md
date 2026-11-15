@@ -52,7 +52,7 @@ result = generate(
     placement="inside_parenchyma",
     output_region="lesion",
 )
-print(result["outputs"]["synthetic_image"])
+print(result["outputs"]["image"])
 ```
 
 The synthetic CT is written on the standardized RAS 1 mm grid. `output_region="lesion"`
