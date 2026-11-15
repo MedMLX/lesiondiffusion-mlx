@@ -6,7 +6,7 @@ Add synthetic lesions to CT with native MLX, with controls for organ, size, plac
 
 [![PyPI](https://img.shields.io/pypi/v/lesiondiffusion-mlx)](https://pypi.org/project/lesiondiffusion-mlx/)
 [![Python](https://img.shields.io/pypi/pyversions/lesiondiffusion-mlx)](https://pypi.org/project/lesiondiffusion-mlx/)
-[![License](https://img.shields.io/badge/License-Apache_2.0-blue)](https://github.com/MedMLX/lesiondiffusion-mlx/blob/v0.2.8/LICENSE)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue)](https://github.com/MedMLX/lesiondiffusion-mlx/blob/v0.3.0/LICENSE)
 [![Apple Silicon](https://img.shields.io/badge/Apple_Silicon-MLX-black?logo=apple)](https://github.com/ml-explore/mlx)
 [![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97_Hugging_Face-weights-yellow)](https://huggingface.co/MedMLX/lesiondiffusion-mlx)
 [![MedMLX](https://img.shields.io/badge/MedMLX-runtime-A51C30)](https://github.com/MedMLX/medmlx)
@@ -34,7 +34,7 @@ give the precision of each network in these measurements.
 ```bash
 uv venv --python 3.13
 source .venv/bin/activate
-uv pip install "lesiondiffusion-mlx>=0.2.8"
+uv pip install "lesiondiffusion-mlx>=0.3.0"
 ```
 
 ## Run
@@ -194,4 +194,4 @@ For Codex, use `codex mcp add medmlx -- "$MEDMLX" serve --root "$HOME/medmlx-wor
 
 ## License
 
-[Apache-2.0](https://github.com/MedMLX/lesiondiffusion-mlx/blob/v0.2.8/LICENSE). See [third-party notices](https://github.com/MedMLX/lesiondiffusion-mlx/blob/v0.2.8/THIRD_PARTY_NOTICES.md). Model weights retain their publisher terms.
+[Apache-2.0](https://github.com/MedMLX/lesiondiffusion-mlx/blob/v0.3.0/LICENSE). See [third-party notices](https://github.com/MedMLX/lesiondiffusion-mlx/blob/v0.3.0/THIRD_PARTY_NOTICES.md). Model weights retain their publisher terms.
