@@ -13,12 +13,13 @@ import numpy as np
 import pytest
 import safetensors.numpy as safe_numpy
 from medmlx_core.errors import AssetNotReadyError, InvalidInputError
+from medmlx_core.outputs import validate_outputs
 
 from lesiondiffusion_mlx import medmlx
 from lesiondiffusion_mlx._arrays import BoolArray, FloatArray, HostArray, NumericArray
 from lesiondiffusion_mlx._nifti import nib
 from lesiondiffusion_mlx._typing import ArrayConstructor
-from lesiondiffusion_mlx.medmlx import run
+from lesiondiffusion_mlx.medmlx import generate
 from lesiondiffusion_mlx.mlx_model import UnetConfig, VqAutoencoder
 from lesiondiffusion_mlx.mlx_sampling import DdimSampler
 from tests import _runner_cases as cases
@@ -264,7 +265,7 @@ def test_invalid_arguments_fail_before_downloading_weights(
     arguments = _arguments(scan, output, tmp_path, **{**overrides, **paths})
     arguments.pop("weights_path")
     with pytest.raises(InvalidInputError):
-        run(**arguments)
+        generate(**arguments)
     if existing is not None and existing.startswith("dangling:"):
         assert (output / existing.removeprefix("dangling:")).is_symlink()
 
@@ -275,7 +276,7 @@ def test_missing_or_mismatched_weights_raise_asset_not_ready(
     """Report a missing folder, file or stage, and an unreadable bundle, as asset errors."""
     output = tmp_path / "out"
     with pytest.raises(AssetNotReadyError):
-        run(**_arguments(scan, output, tmp_path / "absent"))
+        generate(**_arguments(scan, output, tmp_path / "absent"))
 
     def copy(name: str) -> Path:
         """Copy fixture weights into a named temporary directory."""
@@ -285,19 +286,19 @@ def test_missing_or_mismatched_weights_raise_asset_not_ready(
     weights = copy("missing_safetensors")
     (weights / "model.safetensors").unlink()
     with pytest.raises(AssetNotReadyError):
-        run(**_arguments(scan, output, weights))
+        generate(**_arguments(scan, output, weights))
     weights = copy("no_linet_text")
     packed = load_safe(str(weights / "model.safetensors"))
     kept = {key: value for key, value in packed.items() if not key.startswith("linet_text.")}
     save_safe(kept, str(weights / "model.safetensors"))
     with pytest.raises(AssetNotReadyError):
-        run(**_arguments(scan, output, weights, inference_mode="conditioned"))
+        generate(**_arguments(scan, output, weights, inference_mode="conditioned"))
     # Source mode does not condition LINet on text.
     assert medmlx.require_weights(weights, inference_mode="source") == weights
     weights = copy("corrupt_safetensors")
     (weights / "model.safetensors").write_bytes(b"not a safetensors header")
     with pytest.raises(AssetNotReadyError):
-        run(**_arguments(scan, output, weights))
+        generate(**_arguments(scan, output, weights))
 
 
 @pytest.fixture
@@ -381,10 +382,16 @@ def test_run_matches_upstream_end_to_end(
     monkeypatch.setattr(medmlx.time, "monotonic_ns", lambda: 0)
     (output / f".lesiondiffusion-{os.getpid()}-0-target_mask.nii.gz").symlink_to(victim)
 
-    result = run(**_arguments(scan, output, tiny_weights))
+    result = generate(**_arguments(scan, output, tiny_weights))
     assert victim.read_bytes() == b"original"
     images = {role: nib.load(path) for role, path in result["outputs"].items()}
     assert set(images) == {"synthetic_image", "target_mask", "organ_mask"}
+    checked = validate_outputs(result)
+    assert {role: entry["kind"] for role, entry in checked.artifacts.items()} == {
+        "synthetic_image": "synthetic_image",
+        "target_mask": "label_map",
+        "organ_mask": "label_map",
+    }
     source = nib.load(scan[0])
     for image in images.values():
         assert image.shape == source.shape
@@ -463,9 +470,9 @@ def test_native_generation_is_finite_and_repeats_its_seed(
 ) -> None:
     """Run the default conditioned mode natively; the same seed repeats exactly."""
 
-    def generate(name: str) -> dict[str, NumericArray]:
+    def draw(name: str) -> dict[str, NumericArray]:
         """Run conditioned generation and read every written role."""
-        result = run(
+        result = generate(
             **_arguments(scan, tmp_path / name, conditioned_weights, inference_mode="conditioned")
         )
         return {
@@ -473,7 +480,7 @@ def test_native_generation_is_finite_and_repeats_its_seed(
             for role, path in result["outputs"].items()
         }
 
-    first, again = generate("first"), generate("again")
+    first, again = draw("first"), draw("again")
     for role, actual in first.items():
         np.testing.assert_array_equal(actual, again[role])
     image = first["synthetic_image"]

@@ -1,6 +1,6 @@
 """MedMLX file runner for the pinned upstream LMNet and LINet pipeline.
 
-``run`` takes a CT and an organ mask as NIfTI files, standardizes them to a RAS 1 mm
+``generate`` takes a CT and an organ mask as NIfTI files, standardizes them to a RAS 1 mm
 grid, and writes a CT with one synthetic lesion plus the lesion and organ masks. The
 lesion shape comes from LMNet, or from a supplied lesion mask that LINet inpaints
 directly. The helpers below it cover weight loading, option parsing, geometry, box
@@ -30,6 +30,8 @@ from medmlx_core.errors import (
     MedmlxError,
     ModelExecutionError,
 )
+from medmlx_core.outputs import RunResult as _RunResult
+from medmlx_core.outputs import artifact
 from medmlx_core.runtime import import_mlx
 from medmlx_core.weights import weights_dir, weights_revision
 
@@ -113,7 +115,7 @@ MODEL: Final[dict[str, str | float]] = {
     "id": MODEL_ID,
     "label": "LesionDiffusion CT lesion insertion",
     "task": "generation",
-    "run": "lesiondiffusion_mlx.medmlx:run",
+    "run": "lesiondiffusion_mlx.medmlx:generate",
     "summary": (
         "Insert one phenotype-controlled synthetic lesion into a CT, given a binary organ "
         "mask, or inpaint a supplied binary lesion mask. Outputs use a RAS 1 mm grid."
@@ -210,16 +212,10 @@ class RunDetails(TypedDict):
     warning: str
 
 
-class RunResult(TypedDict):
-    """Return value of ``run``.
-
-    ``outputs`` maps a role to a POSIX file path: ``synthetic_image``, ``target_mask``
-    and ``organ_mask``, plus ``raw_synthetic_image`` when ``output_region`` is
-    ``"box"`` or ``"lesion"``.
-    """
-
-    outputs: dict[str, str]
-    details: RunDetails
+# Return value of ``lesiondiffusion_mlx.generate``: ``outputs`` maps ``synthetic_image``,
+# ``target_mask`` and ``organ_mask`` (plus ``raw_synthetic_image`` when ``output_region``
+# is ``"box"`` or ``"lesion"``) to file paths; ``artifacts`` describes each file.
+type RunResult = _RunResult[RunDetails]
 
 
 type _PathArg = str | PathLike[str]
@@ -237,7 +233,7 @@ class LesionDiffusionOptions:
     the cavity phrase in the text. ``shape`` through ``specific_features`` are free
     text for the upstream report. ``seed`` (0 to 2**32 - 1) seeds MT19937 box placement
     and MLX sampling. ``inference_mode`` is ``"conditioned"`` or ``"source"`` and
-    ``output_region`` is ``"full"``, ``"box"`` or ``"lesion"``; see ``run``.
+    ``output_region`` is ``"full"``, ``"box"`` or ``"lesion"``; see ``generate``.
 
     Raises:
         InvalidInputError: From construction, for any value outside these contracts.
@@ -336,7 +332,7 @@ class _Geometry:
     lesion_mask: BoolArray | None = None
 
 
-def run(
+def generate(
     *,
     image_path: _PathArg,
     organ_mask_path: _PathArg,
@@ -666,8 +662,28 @@ def _run_result(
         "requires_human_review": True,
         "warning": WARNING,
     }
+    artifacts = {
+        "synthetic_image": artifact(
+            kind="synthetic_image", coordinate_space="image_physical", units="HU"
+        ),
+        "target_mask": artifact(
+            kind="label_map",
+            coordinate_space="image_physical",
+            labels=[{"value": 1, "name": options.lesion_type}],
+        ),
+        "organ_mask": artifact(
+            kind="label_map",
+            coordinate_space="image_physical",
+            labels=[{"value": geometry.organ_label, "name": options.organ}],
+        ),
+    }
+    if "raw_synthetic_image" in outputs:
+        artifacts["raw_synthetic_image"] = artifact(
+            kind="synthetic_image", coordinate_space="image_physical", units="HU"
+        )
     return {
         "outputs": {role: path.as_posix() for role, path in outputs.items()},
+        "artifacts": artifacts,
         "details": cast(RunDetails, _json_safe(details)),
     }
 
@@ -1940,7 +1956,7 @@ def materialize_arrays(
         geometry: Standardized inputs; ``output_reference`` defines the written grid.
         image_data: Generated CT (HU) on the even-padded grid.
         lesion_data: Label map on the same grid; 2 marks the lesion.
-        output_region: ``"full"``, ``"box"`` or ``"lesion"``; see ``run``.
+        output_region: ``"full"``, ``"box"`` or ``"lesion"``; see ``generate``.
         input_reconstruction: Decode of the unmodified input latent on the same grid;
             required for, and only used by, ``output_region="lesion"``.
 
@@ -2296,9 +2312,9 @@ def _json_safe(value: object) -> object:
 __all__ = [
     "MODEL",
     "LesionDiffusionOptions",
+    "generate",
     "load_stage",
     "require_weights",
-    "run",
     "run_native_pipeline",
     "select_lesion_component",
     "source_organ_label",

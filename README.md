@@ -40,9 +40,9 @@ uv pip install "lesiondiffusion-mlx>=0.2.8"
 ## Run
 
 ```python
-from lesiondiffusion_mlx.medmlx import run
+from lesiondiffusion_mlx.medmlx import generate
 
-result = run(
+result = generate(
     image_path="ct_1mm_ras.nii.gz",
     organ_mask_path="liver_mask.nii.gz",
     output_dir="out",
@@ -112,7 +112,7 @@ it shifts attenuation by several HU, by an amount that depends on the volume.
 | `"lesion"` | Also decodes the unchanged input, and adds only the difference between the two decodes to the input CT, within 33 voxels of the lesion along each axis. The shift cancels, and voxels farther away are the input unchanged. Use it when the surrounding anatomy should keep its measured values |
 
 `"box"` and `"lesion"` also write the full reconstruction as `raw_synthetic_ct.nii.gz`.
-`run` returns `{"outputs": {...}, "details": {...}}`, with run metadata in `details`.
+`generate` returns `{"outputs": {...}, "details": {...}}`, with run metadata in `details`.
 Invalid inputs raise `InvalidInputError`; missing or mismatched weights raise
 `AssetNotReadyError`. Synthetic output is not ground truth.
 

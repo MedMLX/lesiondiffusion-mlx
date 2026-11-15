@@ -37,7 +37,7 @@ authors = [
   { name = "Alfredo Sandoval Jr." },
 ]
 dependencies = [
-  "medmlx-core>=0.2.6,<0.3",
+  "medmlx-core>=0.3,<0.4",
   "mlx==0.32.4; platform_system == 'Darwin' and platform_machine == 'arm64'",
   "nibabel>=5.3,<6",
   "numpy>=2.2,<3",
