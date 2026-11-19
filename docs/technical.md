@@ -420,11 +420,108 @@ masks overlap with Dice 0.65, as expected for a different sampling trajectory.
 
 ## Peak memory
 
-The README's peak MLX memory figures for `lesiondiffusion` are **5.19 GB** in the default
-conditioned mode and **3.46 GB** in source mode, on a 160×160×128, 1 mm RAS crop.
+Peak MLX memory is the maximum active allocation reported by `mx.get_peak_memory()`
+in decimal GB. It excludes the allocator's free-buffer cache, host preprocessing and
+other applications. The earlier 5.19 GB conditioned and 3.46 GB source measurements
+used the AMOS 0008 RAS 160×160×128 crop and 200 diffusion steps on an M5 Max; the
+same conditioned run on the M1 Max reached 7.58 GB (see below). On the full
+440×440×248 grid, the previous whole-volume M1 Max measurement was 92.4 GB.
 
-Both measurements used an AMOS case 0008 crop and 200 diffusion steps: FP32 LMNet and
-text encoders, FP16 LINet and VQ encoder, and an FP32 VQ decoder in conditioned mode
-(FP16 in source mode). `output_region="lesion"` decodes twice in sequence without
-raising the peak. They do not measure larger volumes. Peak MLX memory excludes host
-preprocessing and other applications.
+### Upstream inference
+
+The pinned inference configuration passes the whole preprocessed CT to the FP16 VQ
+encoder. LMNet processes a 64×152×152 window around each selected box. LINet samples
+64×64×64 latent windows corresponding to 128×128×128 CT windows, then inserts the
+results into the complete latent. `split_quantize=True` searches the codebook in four
+pieces, joins the results and sends the whole quantized volume to the next CUDA
+device for a single decode. The configured 3D pipeline leaves `patch_distributed_vq`
+unset. The inherited unfold/fold branch uses two spatial dimensions.
+[LINet inference configuration](https://github.com/HengruiTianSJTU/LesionDiffusion/blob/880736e2b8a4d9becdb6594da7f8af6db19d04d1/pipeline/configs/diffusion/lesiondiffusion_test.yaml),
+[sampling and latent replacement](https://github.com/HengruiTianSJTU/LesionDiffusion/blob/880736e2b8a4d9becdb6594da7f8af6db19d04d1/pipeline/ldm/models/diffusion/ddpm.py#L2662-L2896),
+[VQ decode](https://github.com/HengruiTianSJTU/LesionDiffusion/blob/880736e2b8a4d9becdb6594da7f8af6db19d04d1/pipeline/ldm/models/autoencoder.py#L398-L453).
+
+The v2 writer converts the decoded CT to NumPy, restores orientation and maps
+intensities back to HU over the entire array. Outside the lesion it writes the VQ
+reconstruction of the surrounding anatomy. The MLX `"full"` output and the
+`raw_image` from the regional modes have the same whole-volume coverage.
+[Upstream output writer](https://github.com/HengruiTianSJTU/LesionDiffusion/blob/880736e2b8a4d9becdb6594da7f8af6db19d04d1/pipeline/inference/models.py#L310-L323),
+[v2 inference wrapper](https://github.com/HengruiTianSJTU/LesionDiffusion/blob/880736e2b8a4d9becdb6594da7f8af6db19d04d1/pipeline/inference/models.py#L631-L678).
+
+### Whole-volume stage peaks on M1 Max
+
+The measurements used an M1 Max with 64 GB, macOS 27.2.1, Python 3.13.17,
+MLX 0.32.4, medmlx-core 0.3.0 and the released EMA weights. Each run used
+conditioned inference, `output_region="full"`, DDIM20, seed 23 and a
+30×30×20 mm liver tumor box. The small crop is AMOS 0008. The other crops
+are from HCC-TACE-Seg HCC_063. The box centers were (80, 80, 64),
+(121, 120, 87) and (169, 144, 119) on their 1 mm RAS grids.
+
+Stage profiles used one fresh process per crop at `10bac01` with a 1 GiB
+MLX free-cache cap. Each measurement synchronized and reset the peak before
+its stage. The LINet column covers sampling. The decoder column includes HU
+conversion and transfer to the host. The swap-out counter stayed constant
+across all three runs.
+
+| RAS grid | LMNet | VQ encoder | LINet sampling | VQ decoder |
+| --- | ---: | ---: | ---: | ---: |
+| 160×160×128 | 2.78 GB | 3.79 GB | 2.00 GB | 7.58 GB |
+| 240×240×160 | 2.78 GB | 10.64 GB | 2.01 GB | 21.29 GB |
+| 288×288×192 | 2.78 GB | 18.38 GB | 2.02 GB | 36.77 GB |
+
+The VQ decoder set the peak at each size, growing by about 2.31 GB per million
+voxels. A single 96-channel FP32 activation at 440×440×248 occupies 18.4 GB.
+Splitting a convolution and concatenating its outputs still materializes that
+activation. Staging the activations lets each layer release its MLX buffers
+before loading the next slab.
+
+### Slab VQ
+
+`vq_mode="slab"` runs the same VQ layers and codebook search as conditioned
+`vq_mode="whole"`, using the FP16 encoder and FP32 decoder. It stages intermediate
+activations in temporary files in NCDHW order. Each GroupNorm statistic sees every
+spatial position in its group. Convolution reads the neighboring depth planes
+needed by its kernel, keeps only the requested output planes and uses the same
+boundary padding and factor-two sampling phase. This preserves full-volume context
+and lets each output region use its existing reconstruction and compositing.
+
+VQ traverses the volume by axial slab for convolution and by channel group for
+normalization statistics. CPU work stages the activations between file storage and
+MLX. Temporary files are discarded when their last layer finishes using them and
+when a stage fails. For the released 96-channel model, reserve up to three full-size
+FP32 features on disk (55.3 GB for 440×440×248). Set `TMPDIR` before starting
+Python to choose the temporary volume. The padded grid may have up to 1,048,576
+voxels per axial plane and must fit one FP32 normalization group in less than 2 GiB.
+The file runner caps the free MLX cache at 1 GiB and restores the caller's limit
+after native generation.
+`"slab"` requires `inference_mode="conditioned"` and `decoder_mode="reference"`.
+
+### Slab measurements on M1 Max
+
+The cold slab runs used the same hardware, precision and DDIM20 controls as the
+stage profiles. The full HCC_063 run used the original 512×512×99 CT and liver
+annotation, standardized by `run` to RAS 440×440×248 with the box centered at
+(321, 198, 175). Each wall time covers a fresh `run` call through synchronization,
+including geometry preparation, weight loading, diffusion and NIfTI writing.
+The MLX peak was reset once before each call.
+
+| RAS grid | Peak MLX | Wall time |
+| --- | ---: | ---: |
+| 160×160×128 | 2.78 GB | 75.3 s |
+| 240×240×160 | 2.78 GB | 151.6 s |
+| 440×440×248 | 2.81 GB | 815.8 s |
+
+On the full grid, VQ encoding took 190.2 s and decoding with HU export took
+583.3 s. The run wrote finite output and a 7,614-voxel lesion mask. The swap-out
+counter stayed constant across all three slab runs.
+
+The paired DDIM20 comparisons at 160×160×128 and 240×240×160 produced
+bit-identical CT arrays, lesion and organ masks and affines. The maximum and
+mean absolute differences were both 0 HU over the full written region and
+within the lesion mask on each crop. Full-volume output on 440×440×248 was
+verified for geometry and finite values.
+
+### Default-path parity
+
+On the M1 Max, the default DDIM200 run and `10bac01` on the AMOS 0008
+160×160×128 crop wrote bit-identical synthetic CT, lesion mask, organ mask and
+affines. Both runs reached 7.58 GB of peak MLX allocation.

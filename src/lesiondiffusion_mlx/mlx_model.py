@@ -12,7 +12,7 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from itertools import pairwise
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
     from lesiondiffusion_mlx._typing import Array, Mlx
@@ -654,6 +654,47 @@ class LdmUnet(SourceLayers):
         )
 
 
+class _VqLayers[T](Protocol):
+    """VQ stages over native tensors or file-backed activations."""
+
+    def conv(self, x: T, key: str, *, padding: int = 1) -> T: ...
+    def residual(self, x: T, key: str) -> T: ...
+    def downsample(self, x: T, key: str) -> T: ...
+    def upsample_conv(self, x: T, key: str) -> T: ...
+    def norm_silu_conv(
+        self, x: T, norm_key: str, conv_key: str, *, groups: int, eps: float
+    ) -> T: ...
+
+
+def vq_encode_layers[T](layers: _VqLayers[T], x: T) -> T:
+    """Apply the pinned encoder topology to a normalized CT activation."""
+    x = layers.conv(x, "encoder.conv_in")
+    for level in range(3):
+        x = layers.residual(x, f"encoder.down.{level}.block.0")
+        if level == 0:
+            x = layers.downsample(x, "encoder.down.0.downsample.conv")
+    x = layers.residual(x, "encoder.mid.block_1")
+    x = layers.residual(x, "encoder.mid.block_2")
+    x = layers.norm_silu_conv(x, "encoder.norm_out", "encoder.conv_out", groups=16, eps=1e-6)
+    return layers.conv(x, "quant_conv", padding=0)
+
+
+def vq_decode_layers[T](layers: _VqLayers[T], x: T) -> T:
+    """Apply the pinned decoder topology after optional codebook selection."""
+    x = layers.conv(x, "post_quant_conv", padding=0)
+    x = layers.conv(x, "decoder.conv_in")
+    x = layers.residual(x, "decoder.mid.block_1")
+    x = layers.residual(x, "decoder.mid.block_2")
+    for level in reversed(range(3)):
+        for block in range(2):
+            x = layers.residual(x, f"decoder.up.{level}.block.{block}")
+        if level == 1:
+            x = layers.upsample_conv(x, "decoder.up.1.upsample.conv")
+    return layers.norm_silu_conv(
+        x, "decoder.norm_out", "decoder.conv_out", groups=16, eps=1e-6
+    )
+
+
 class VqAutoencoder(SourceLayers):
     """Upstream's 3-D VQ autoencoder, as used by LINet: factor-two spatial latent.
 
@@ -728,16 +769,12 @@ class VqAutoencoder(SourceLayers):
 
     def encode(self, x: Array) -> Array:
         """Return the unquantized NCDHW latent with each spatial axis halved, rounded down."""
-        x = self.conv(x, "encoder.conv_in")
-        for level in range(3):
-            x = self.residual(x, f"encoder.down.{level}.block.0")
-            if level == 0:
-                x = self.mx.pad(x, [(0, 0), (0, 0), (0, 1), (0, 1), (0, 1)])
-                x = self.conv(x, "encoder.down.0.downsample.conv", padding=0, stride=2)
-        x = self.residual(x, "encoder.mid.block_1")
-        x = self.residual(x, "encoder.mid.block_2")
-        x = self.norm_silu_conv(x, "encoder.norm_out", "encoder.conv_out", groups=16, eps=1e-6)
-        return self.conv(x, "quant_conv", padding=0)
+        return vq_encode_layers(self, x)
+
+    def downsample(self, x: Array, key: str) -> Array:
+        """Pad the upper edge of each axis before the valid stride-two convolution."""
+        x = self.mx.pad(x, [(0, 0), (0, 0), (0, 1), (0, 1), (0, 1)])
+        return self.conv(x, key, padding=0, stride=2)
 
     def quantize(self, z: Array, *, chunk_size: int = 4096) -> Array:
         """Select a nearest codebook entry for each latent vector of NCDHW ``z``.
@@ -807,16 +844,7 @@ class VqAutoencoder(SourceLayers):
 
         Set ``quantize=False`` to skip the codebook lookup and decode ``z`` as given.
         """
-        x = self.conv(self.quantize(z) if quantize else z, "post_quant_conv", padding=0)
-        x = self.conv(x, "decoder.conv_in")
-        x = self.residual(x, "decoder.mid.block_1")
-        x = self.residual(x, "decoder.mid.block_2")
-        for level in reversed(range(3)):
-            for block in range(2):
-                x = self.residual(x, f"decoder.up.{level}.block.{block}")
-            if level == 1:
-                x = self.upsample_conv(x, "decoder.up.1.upsample.conv")
-        return self.norm_silu_conv(x, "decoder.norm_out", "decoder.conv_out", groups=16, eps=1e-6)
+        return vq_decode_layers(self, self.quantize(z) if quantize else z)
 
 
 class BiomedTextEncoder(SourceLayers):

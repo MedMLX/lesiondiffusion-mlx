@@ -23,12 +23,17 @@ Add synthetic lesions to CT with native MLX, with controls for organ, size, plac
 
 | Model | Weights download | Peak MLX memory | Measured on |
 | :--- | ---: | ---: | :--- |
-| `lesiondiffusion`, conditioned mode (default) | 1.7 GB | 5.19 GB | 160×160×128, 1 mm RAS crop, 200 diffusion steps |
-| `lesiondiffusion`, source mode | 1.7 GB | 3.46 GB | 160×160×128, 1 mm RAS crop, 200 diffusion steps |
-| `lesiondiffusion`, conditioned mode (default) | 1.7 GB | 92.4 GB | M1 Max (64 GB), 440×440×248, 1 mm RAS (a 512×512×99 abdominal CT), 200 diffusion steps |
+| `lesiondiffusion`, conditioned mode (default) | 1.7 GB | 5.19 GB | M5 Max, 160×160×128, 1 mm RAS crop, 200 diffusion steps |
+| `lesiondiffusion`, conditioned mode (default) | 1.7 GB | 7.58 GB | M1 Max (64 GB), 160×160×128, 1 mm RAS crop, 200 diffusion steps |
+| `lesiondiffusion`, source mode | 1.7 GB | 3.46 GB | M5 Max, 160×160×128, 1 mm RAS crop, 200 diffusion steps |
+| `lesiondiffusion`, conditioned mode (default) | 1.7 GB | 92.4 GB | M1 Max (64 GB), 440×440×248, 1 mm RAS, 200 diffusion steps |
+| `lesiondiffusion`, conditioned with `vq_mode="slab"` | 1.7 GB | 2.81 GB | M1 Max (64 GB), 440×440×248, 1 mm RAS from a 512×512×99 abdominal CT, 20 diffusion steps |
 
-Memory grows with the standardized 1 mm volume, because the whole volume is encoded
-and decoded. To reduce memory use, crop the CT and organ mask together on the same grid.
+In the default mode, memory grows with the standardized 1 mm volume, because the
+whole volume is encoded and decoded. For a large CT, either crop the CT and organ
+mask together on the same grid, or pass `vq_mode="slab"` to reconstruct the full
+volume with less MLX memory. The slab path needs temporary disk space on `TMPDIR`
+or the system temp volume: allow 56 GB free for a 440×440×248 grid.
 
 Requires Apple Silicon with Metal. The [technical notes](https://github.com/MedMLX/lesiondiffusion-mlx/blob/main/docs/technical.md)
 give the precision of each network in these measurements.
@@ -86,6 +91,7 @@ required.
 | `lmnet_diffusion_steps`, `linet_diffusion_steps` | Optional stage overrides; each defaults to `diffusion_steps` |
 | `sampler` | `"ddim"` (default) or `"dpmpp_2m"` in conditioned mode |
 | `decoder_mode` | `"reference"` (default) or `"scaled_fp16"` with conditioned mode and enabled NAX |
+| `vq_mode` | `"whole"` (default) or `"slab"` in conditioned mode with the reference decoder. Slab mode uses temporary files for VQ activations and supports all output regions |
 | `inference_mode` | `"conditioned"` (default) or `"source"`; see below |
 | `output_region` | `"full"` (default), `"box"` or `"lesion"`; see below |
 | `weights_path` | Optional folder containing `model.safetensors` and `tokenizer.json` |
@@ -110,8 +116,8 @@ with load_model() as model:
 
 The model keeps the validated geometry, the encoded CT latent and, for lesion
 output, the unmodified reconstruction; each draw builds fresh text conditioning and
-sampler state. The CT, masks, weights, organ, inference mode, decoder mode and
-output region stay fixed after the first draw.
+sampler state. The CT, masks, weights, organ, inference mode, decoder mode,
+VQ mode and output region stay fixed after the first draw.
 
 To keep 200-step mask generation and use 50-step CT inpainting, pass
 `lmnet_diffusion_steps=200, linet_diffusion_steps=50`. Changing the inpainting

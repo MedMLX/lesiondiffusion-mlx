@@ -1,5 +1,12 @@
 # Release notes
 
+## Unreleased
+
+**`vq_mode="slab"` runs large CTs with lower MLX memory.** In conditioned
+inference with the reference decoder, it stages VQ activations on temporary
+disk storage and retains whole-volume normalization and reconstruction.
+A 440×440×248 abdominal CT used 2.81 GB peak MLX memory on M1 Max with DDIM20.
+
 ## 0.3.0
 
 ### Breaking changes

@@ -267,6 +267,12 @@ def _arguments(
         ({"sampler": "unknown"}, None),
         ({"decoder_mode": "unknown"}, None),
         ({"decoder_mode": "scaled_fp16", "inference_mode": "source"}, None),
+        ({"vq_mode": "unknown"}, None),
+        ({"vq_mode": "slab", "inference_mode": "source"}, None),
+        (
+            {"vq_mode": "slab", "inference_mode": "conditioned", "decoder_mode": "scaled_fp16"},
+            None,
+        ),
         ({"sampler": "dpmpp_2m", "inference_mode": "source"}, None),
         (
             {"sampler": "dpmpp_2m", "inference_mode": "conditioned", "diffusion_steps": 1000},
@@ -287,6 +293,9 @@ def _arguments(
         "sampler-choice",
         "decoder-choice",
         "source-scaled-decoder",
+        "vq-choice",
+        "source-slab-vq",
+        "scaled-decoder-slab-vq",
         "source-sampler",
         "dpm-training-schedule-limit",
         "output-conflict",
@@ -564,6 +573,39 @@ def test_native_generation_is_finite_and_repeats_its_seed(
     assert first["mask"].dtype == np.uint8
     assert set(np.unique(first["mask"])) <= {0, 1}
     assert np.any(first["mask"])
+
+
+def test_slab_vq_preserves_full_reconstruction_and_lesion_output(
+    scan: tuple[Path, Path],
+    conditioned_weights: Path,
+    tiny_networks: None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mx: Mlx,
+) -> None:
+    """Exercise depth halos and global GroupNorm in both decoder passes on a real CT crop."""
+    from lesiondiffusion_mlx import _slab_vq
+
+    # Force multiple slabs and a short final slab on the small CT fixture.
+    monkeypatch.setattr(_slab_vq, "_SLAB_VOXELS", 6 * 24 * 24)
+    reference, slab = (
+        run(**_arguments(
+            scan, tmp_path / mode, conditioned_weights,
+            inference_mode="conditioned", output_region="lesion", vq_mode=mode,
+        ))
+        for mode in ("whole", "slab")
+    )
+    assert reference["outputs"].keys() == slab["outputs"].keys()
+    for role, baseline_path in reference["outputs"].items():
+        baseline = nib.load(baseline_path)
+        actual = nib.load(slab["outputs"][role])
+        expected = cast(NumericArray, np.asanyarray(baseline.dataobj))
+        values = cast(NumericArray, np.asanyarray(actual.dataobj))
+        np.testing.assert_array_equal(actual.affine, baseline.affine)
+        if role in {"image", "raw_image"}:
+            np.testing.assert_allclose(values, expected, atol=0.01, rtol=0)
+        else:
+            np.testing.assert_array_equal(values, expected)
 
 
 class _Draw(TypedDict):

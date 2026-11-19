@@ -43,6 +43,7 @@ from lesiondiffusion_mlx._nifti import ImageFileError, NiftiImage, nib
 from lesiondiffusion_mlx._reference import REFERENCE as _REFERENCE
 from lesiondiffusion_mlx._scaled_vq import ScaledVqDecoder
 from lesiondiffusion_mlx._schedules import dpm_solver_timesteps, is_integer
+from lesiondiffusion_mlx._slab_vq import SlabVqAutoencoder, require_slab_capacity
 from lesiondiffusion_mlx._spatial import resize_nearest
 from lesiondiffusion_mlx._typing import ArrayConstructor
 
@@ -89,6 +90,7 @@ LOCALIZATION_MARGIN_MM: Final = 6.0
 # applies the change within this reach and keeps the input beyond it.
 DECODER_REACH_VOXELS: Final = 33
 _SCALED_CACHE_LIMIT_BYTES: Final = 4 << 30
+_SLAB_CACHE_LIMIT_BYTES: Final = 1 << 30
 SOURCE_REF: Final[str] = _REFERENCE["revision"]
 WEIGHT_STAGES: Final = ("lmnet", "linet", "vq", "lmnet_text", "linet_text")
 SOURCE_INFERENCE_STAGES: Final = tuple(name for name in WEIGHT_STAGES if name != "linet_text")
@@ -144,7 +146,7 @@ class NativeRuntime(TypedDict):
     plain-language statement of what a seed reproduces. ``lesion_mask_source`` is
     ``"lmnet"`` or ``"supplied"``; a supplied mask skips LMNet, so its attempts are 0,
     its conditioning is empty and its stage record has ``status="skipped"``.
-    ``cache_limit_bytes`` records the temporary free-cache cap for scaled decoding.
+    ``cache_limit_bytes`` records the temporary free-cache cap for scaled decoding or slab VQ.
     """
 
     device: str
@@ -217,6 +219,7 @@ class RunDetails(TypedDict):
     linet_diffusion_steps: int
     sampler: str
     decoder_mode: str
+    vq_mode: str
     generation_spec: GenerationSpec
     stages: dict[str, dict[str, object]]
     output_region: str
@@ -282,6 +285,7 @@ class LesionDiffusionOptions:
     linet_diffusion_steps: int | None = None
     sampler: str = "ddim"
     decoder_mode: str = "reference"
+    vq_mode: str = "whole"
 
     def __post_init__(self) -> None:
         """Validate inference, geometry, and lesion-generation options."""
@@ -297,6 +301,14 @@ class LesionDiffusionOptions:
             raise InvalidInputError("LesionDiffusion decoder_mode must be reference or scaled_fp16")
         if self.inference_mode == "source" and self.decoder_mode != "reference":
             raise InvalidInputError("LesionDiffusion source mode requires decoder_mode='reference'")
+        if self.vq_mode not in {"whole", "slab"}:
+            raise InvalidInputError("LesionDiffusion vq_mode must be whole or slab")
+        if self.vq_mode == "slab" and (
+            self.inference_mode != "conditioned" or self.decoder_mode != "reference"
+        ):
+            raise InvalidInputError(
+                "LesionDiffusion slab VQ requires conditioned inference and the reference decoder"
+            )
         if self.organ not in SOURCE_ORGAN_LABELS:
             raise InvalidInputError(f"Unknown upstream organ: {self.organ}")
         if not self.lesion_type.strip():
@@ -385,6 +397,7 @@ class _PreparedIdentity:
     organ: str
     inference_mode: str
     decoder_mode: str
+    vq_mode: str
     output_region: str
 
 
@@ -420,7 +433,7 @@ class _Preparation:
             ))
         identity = _PreparedIdentity(
             tuple(records), options.organ, options.inference_mode,
-            options.decoder_mode, options.output_region,
+            options.decoder_mode, options.vq_mode, options.output_region,
         )
         if self._identity is not None and self._identity != identity:
             raise InvalidInputError(
@@ -455,6 +468,7 @@ def run(
     linet_diffusion_steps: int | None = None,
     sampler: str = "ddim",
     decoder_mode: str = "reference",
+    vq_mode: str = "whole",
     seed: int = DEFAULT_SEED,
     inference_mode: str = DEFAULT_INFERENCE_MODE,
     output_region: str = DEFAULT_OUTPUT_REGION,
@@ -532,6 +546,11 @@ def run(
             post-upsampling overflow, while half rounding changes decoded HU.
             During native generation it caps MLX's process-wide free cache at
             4 GiB, respects a tighter caller limit and restores the previous limit.
+        vq_mode: ``"whole"`` runs VQ on the entire volume in MLX. ``"slab"``
+            uses file-backed activations to reconstruct the entire volume with
+            whole-grid GroupNorm and slab-wise convolutions. It requires conditioned
+            inference and the reference decoder. It uses temporary disk space
+            (selected by ``TMPDIR``) and caps the free MLX cache at 1 GiB while running.
         seed: Seeds box placement and native MLX sampling. MLX's RNG differs from
             Torch's, so a seed repeats within MLX only.
         inference_mode: ``"conditioned"`` uses native MLX FP16 convolution and the
@@ -589,6 +608,7 @@ def run(
         linet_diffusion_steps=linet_diffusion_steps,
         sampler=sampler,
         decoder_mode=decoder_mode,
+        vq_mode=vq_mode,
         seed=seed,
         inference_mode=inference_mode,
         output_region=output_region,
@@ -605,7 +625,7 @@ class LesionDiffusionModel:
     """Repeated LesionDiffusion draws on one CT and supplied lesion mask.
 
     The first :meth:`run` call binds the CT, organ mask, lesion mask, weights,
-    organ, inference mode, decoder mode and output region, and keeps the validated
+    organ, inference mode, decoder mode, VQ mode and output region, and keeps the validated
     geometry, the pristine encoded latent and, for ``output_region="lesion"``, the
     unmodified reconstruction. Each later draw builds fresh text conditioning,
     sampler history and RNG state from its own arguments, so its outputs equal those
@@ -639,6 +659,7 @@ class LesionDiffusionModel:
         linet_diffusion_steps: int | None = None,
         sampler: str = "ddim",
         decoder_mode: str = "reference",
+        vq_mode: str = "whole",
         seed: int = DEFAULT_SEED,
         inference_mode: str = DEFAULT_INFERENCE_MODE,
         output_region: str = DEFAULT_OUTPUT_REGION,
@@ -675,6 +696,7 @@ class LesionDiffusionModel:
             linet_diffusion_steps=linet_diffusion_steps,
             sampler=sampler,
             decoder_mode=decoder_mode,
+            vq_mode=vq_mode,
             seed=seed,
             inference_mode=inference_mode,
             output_region=output_region,
@@ -815,15 +837,19 @@ def _optional_input_path(
 
 
 @contextmanager
-def _decoder_cache_limit(mx: Mlx, decoder_mode: str) -> Generator[int | None]:
-    """Bound free cached buffers for scaled decoding and restore the caller's limit."""
-    if decoder_mode != "scaled_fp16":
+def _generation_cache_limit(mx: Mlx, options: LesionDiffusionOptions) -> Generator[int | None]:
+    """Cap free MLX buffers for memory-saving modes and restore the caller's limit."""
+    if options.vq_mode == "slab":
+        cap = _SLAB_CACHE_LIMIT_BYTES
+    elif options.decoder_mode == "scaled_fp16":
+        cap = _SCALED_CACHE_LIMIT_BYTES
+    else:
         yield None
         return
-    previous = mx.set_cache_limit(_SCALED_CACHE_LIMIT_BYTES)
+    previous = mx.set_cache_limit(cap)
     try:
-        limit = min(previous, _SCALED_CACHE_LIMIT_BYTES)
-        if limit != _SCALED_CACHE_LIMIT_BYTES:
+        limit = min(previous, cap)
+        if limit != cap:
             mx.set_cache_limit(limit)
         yield limit
     finally:
@@ -850,7 +876,7 @@ def _execute_run(
     attributes = cast(dict[str, object], cast(list[object], report[str(model_label)])[2])
     mx = cast("Mlx", import_mlx())
     stages: dict[str, dict[str, object]] = {}
-    with _decoder_cache_limit(mx, options.decoder_mode) as cache_limit:
+    with _generation_cache_limit(mx, options) as cache_limit:
         image, reconstruction, mask, facts = run_native_pipeline(
             source_ct_ras=geometry.source_data,
             organ_mask_ras=geometry.organ_mask,
@@ -925,6 +951,7 @@ def _run_result(
         ),
         "sampler": options.sampler,
         "decoder_mode": options.decoder_mode,
+        "vq_mode": options.vq_mode,
         "generation_spec": spec,
         "stages": stages,
         "output_region": options.output_region,
@@ -1038,6 +1065,8 @@ def run_native_pipeline(
         )
     if prepared is not None and prepared.state.geometry is None:
         raise InvalidInputError("Bind the model through its file runner first")
+    if options.vq_mode == "slab":
+        require_slab_capacity(source_ct_ras.shape)
     directory = weights_dir
     tokenizer_path = directory / TOKENIZER_FILE
     if options.decoder_mode == "scaled_fp16" and not nax_available(mx):
@@ -1276,6 +1305,7 @@ def _run_linet(
     """
     lin_started = time.perf_counter()
     source_arithmetic = options.inference_mode == "source"
+    autoencoder = SlabVqAutoencoder if options.vq_mode == "slab" else VqAutoencoder
     encoder_reused = prepared is not None and prepared.state.latent is not None
     if prepared is not None and prepared.state.latent is not None:
         # A new MLX array descriptor keeps slice assignment local to this draw.
@@ -1283,7 +1313,7 @@ def _run_linet(
         load_elapsed = encode_elapsed = 0.0
         nax_convolutions = 0
     else:
-        vq = VqAutoencoder(
+        vq = autoencoder(
             load_stage(directory, "vq", mx, dtype=mx.float16, prefixes=("encoder.", "quant_conv.")),
             mx, source_arithmetic=source_arithmetic,
         )
@@ -1375,7 +1405,7 @@ def _run_linet(
             codebook, mx,
         )
     else:
-        decoder = VqAutoencoder(
+        decoder = autoencoder(
             load_stage(directory, "vq", mx, dtype=decode_dtype, prefixes=decoder_prefixes),
             mx, source_arithmetic=source_arithmetic,
         )
@@ -1405,6 +1435,7 @@ def _run_linet(
         ),
         "quantization_dtype": "float16" if source_arithmetic else "float32",
         "decoder_mode": options.decoder_mode,
+        "vq_mode": options.vq_mode,
         "input_reconstruction_decoded": reconstruction_ras is not None,
         "prepared_encoder_reused": encoder_reused,
         "prepared_reconstruction_reused": reconstruction_reused,
@@ -1628,6 +1659,7 @@ def _parse_options(
     linet_diffusion_steps: object = None,
     sampler: object = "ddim",
     decoder_mode: object = "reference",
+    vq_mode: object = "whole",
 ) -> LesionDiffusionOptions:
     """Validate request values and construct generation options."""
     for name, value in (
@@ -1645,6 +1677,7 @@ def _parse_options(
         ("output_region", output_region),
         ("sampler", sampler),
         ("decoder_mode", decoder_mode),
+        ("vq_mode", vq_mode),
     ):
         if not isinstance(value, str):
             raise InvalidInputError(f"LesionDiffusion {name} must be a string")
@@ -1691,6 +1724,7 @@ def _parse_options(
         linet_diffusion_steps=cast(int | None, linet_diffusion_steps),
         sampler=cast(str, sampler),
         decoder_mode=cast(str, decoder_mode),
+        vq_mode=cast(str, vq_mode),
         seed=cast(int, seed),
         inference_mode=cast(str, inference_mode),
         output_region=cast(str, output_region),
