@@ -158,7 +158,7 @@ wheels = [
 
 [[package]]
 name = "lesiondiffusion-mlx"
-version = "0.2.8"
+version = "0.3.0"
 source = { editable = "../../" }
 dependencies = [
     { name = "medmlx-core" },
@@ -175,7 +175,7 @@ requires-dist = [
     { name = "einops", marker = "extra == 'dev'", specifier = ">=0.8.1,<0.9" },
     { name = "einops", marker = "extra == 'reference'", specifier = "==0.8.2" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.100,<7" },
-    { name = "medmlx-core", specifier = ">=0.2.6,<0.3" },
+    { name = "medmlx-core", specifier = ">=0.3,<0.4" },
     { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = "==0.32.4" },
     { name = "nibabel", specifier = ">=5.3,<6" },
     { name = "numpy", specifier = ">=2.2,<3" },
@@ -195,7 +195,7 @@ provides-extras = ["dev", "reference"]
 
 [[package]]
 name = "medmlx-core"
-version = "0.2.6"
+version = "0.3.1"
 source = { editable = "../../../medmlx/packages/core" }
 dependencies = [
     { name = "httpx" },
@@ -211,8 +211,10 @@ requires-dist = [
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.140,<7" },
     { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = ">=0.32.4,<0.33" },
     { name = "monai", marker = "extra == 'dev'", specifier = "==1.6.1" },
+    { name = "nibabel", marker = "extra == 'dev'", specifier = ">=5.4.2,<6" },
     { name = "numpy", specifier = ">=2.0,<3" },
     { name = "numpy", marker = "extra == 'dev'", specifier = ">=2.2,<3" },
+    { name = "pillow", marker = "extra == 'dev'", specifier = ">=13,<14" },
     { name = "pyright", marker = "extra == 'dev'", specifier = "==1.1.414" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4,<10" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.13,<1" },
@@ -294,7 +296,7 @@ wheels = [
 
 [[package]]
 name = "mlxradiomics"
-version = "1.0.1"
+version = "1.2.0"
 source = { editable = "../../../mlxradiomics" }
 dependencies = [
     { name = "isal" },
@@ -311,7 +313,7 @@ dependencies = [
 requires-dist = [
     { name = "isal", specifier = ">=1.9.1,<2" },
     { name = "matplotlib", marker = "extra == 'viz'", specifier = ">=3.10,<4" },
-    { name = "medmlx-core", specifier = ">=0.2.6,<0.3" },
+    { name = "medmlx-core", specifier = ">=0.3,<0.4" },
     { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = "==0.32.4" },
     { name = "nibabel", specifier = ">=5.3,<6" },
     { name = "numpy", specifier = ">=2.0,<3" },
