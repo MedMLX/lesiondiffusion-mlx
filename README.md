@@ -35,7 +35,7 @@ mask together on the same grid, or pass `vq_mode="slab"` to reconstruct the full
 volume with less MLX memory. The slab path needs temporary disk space on `TMPDIR`
 or the system temp volume: allow 56 GB free for a 440×440×248 grid.
 
-Requires Apple Silicon with Metal. The [technical notes](https://github.com/MedMLX/lesiondiffusion-mlx/blob/main/docs/technical.md)
+The [technical notes](https://github.com/MedMLX/lesiondiffusion-mlx/blob/main/docs/technical.md)
 give the precision of each network in these measurements.
 
 ## Install
@@ -70,8 +70,7 @@ whole volume (see below).
 
 Weights download from `MedMLX/lesiondiffusion-mlx` on first use; `medmlx setup lesiondiffusion`
 downloads them ahead of time. To use your own copy, pass a folder containing
-`model.safetensors` and `tokenizer.json` as `weights_path`. Conversion receipts are not
-required.
+`model.safetensors` and `tokenizer.json` as `weights_path`.
 
 ### Inputs and outputs
 
@@ -114,34 +113,27 @@ with load_model() as model:
         )
 ```
 
-The model keeps the validated geometry, the encoded CT latent and, for lesion
-output, the unmodified reconstruction; each draw builds fresh text conditioning and
-sampler state. The CT, masks, weights, organ, inference mode, decoder mode,
-VQ mode and output region stay fixed after the first draw.
+The CT, masks, weights, organ, inference mode, decoder mode, VQ mode and output
+region stay fixed after the first draw; each draw builds fresh text conditioning
+and sampler state.
 
-To keep 200-step mask generation and use 50-step CT inpainting, pass
-`lmnet_diffusion_steps=200, linet_diffusion_steps=50`. Changing the inpainting
-step count changes the generated CT trajectory while retaining the mask for the
-same seed and mask-generation settings. Results record requested and actual
-step counts for each stage.
+- **Stage steps:** `lmnet_diffusion_steps=200, linet_diffusion_steps=50` keeps
+  200-step mask generation and uses 50-step CT inpainting. For the same seed the
+  mask is unchanged and the CT differs. Results record the requested and actual
+  steps of each stage.
+- **Sampler:** `"dpmpp_2m"` is deterministic DPM-Solver++ 2M with exactly the
+  requested number of denoiser calls per attempt (1–999); mask QC can request a
+  second attempt. It changes both sampling trajectories. Source mode uses DDIM.
+- **Decoder:** `"scaled_fp16"` keeps FP32 codebook selection and runs the decoder
+  in scaled half precision, which prevents the upsampling overflow and changes
+  decoded HU by half rounding. It needs the neural accelerators of an M5 or later
+  GPU and caps MLX's free-buffer cache at 4 GiB during generation. `"reference"`
+  decodes in FP32. Measurements are in the
+  [technical notes](https://github.com/MedMLX/lesiondiffusion-mlx/blob/main/docs/technical.md).
 
-`sampler="dpmpp_2m"` uses deterministic DPM-Solver++ 2M with exactly the requested
-number of denoiser calls per sampling attempt (1–999). Mask QC can request a
-second attempt. It changes both sampling trajectories.
-The default 200-step DDIM path remains the reference; source mode uses DDIM.
-
-`decoder_mode="scaled_fp16"` keeps FP32 codebook selection and uses half decoder
-weights and scaled half activations. Scaling prevents the known upsampling
-overflow; half rounding changes decoded HU. It requires NAX on an M5-class GPU.
-Native generation in this mode caps MLX's free-buffer cache at 4 GiB, respects
-an existing tighter limit and restores the caller's limit afterward.
-`decoder_mode="reference"` keeps conditioned decoding in FP32. Numerical results
-and measurements are in [the technical notes](https://github.com/MedMLX/lesiondiffusion-mlx/blob/main/docs/technical.md).
-
-[LesionControl](https://github.com/MedMLX/lesiondiffusion-mlx/blob/main/research/lesioncontrol/README.md) adds reference-conditioned
-radiomics profiles, bounded control search and a learned context adapter. Its
-research code includes real-HCC adapter training and paired-seed evaluation;
-it has a separate environment under `research/lesioncontrol`.
+[LesionControl](https://github.com/MedMLX/lesiondiffusion-mlx/blob/main/research/lesioncontrol/README.md),
+in `research/lesioncontrol` with its own environment, adds reference-conditioned
+radiomics profiles, bounded control search and a learned context adapter.
 
 **Phenotype text.** `shape`, `density`, `density_variation`, `enhancement`, `surface`,
 `adjacent_relationship` and `specific_features` default to the upstream wording
@@ -175,7 +167,7 @@ it shifts attenuation by several HU, by an amount that depends on the volume.
 roles are `image`, `mask` and `organ_mask`, plus `raw_image` for `"box"` and `"lesion"`;
 `artifacts` describes each file and `details` holds run metadata.
 Invalid inputs raise `InvalidInputError`; missing
-or mismatched weights raise `AssetNotReadyError`. Synthetic output is not ground truth.
+or mismatched weights raise `AssetNotReadyError`.
 
 ### Inference modes
 
@@ -185,7 +177,6 @@ or mismatched weights raise `AssetNotReadyError`. Synthetic output is not ground
 | `"source"` | Follows the upstream inference configuration and arithmetic for reproduction, including FP16 decoding; when that overflows, the run raises an error instead of writing a CT. Results can differ from conditioned output |
 
 MLX and Torch random streams differ, so a seed repeats results only within MLX.
-Inference requires Apple Silicon with Metal.
 
 ## Use with MedMLX
 
