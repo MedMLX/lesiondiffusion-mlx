@@ -35,7 +35,8 @@ that phenotype. LMNet proposes 12 contours at one site; `--candidates` sets
 the number. LesionControl scales each contour along its principal axes to the
 reference volume, elongation and flatness, and selects the closest complete
 contour by sphericity, maximum diameter and solidity. LINet runs once, on
-the selected contour, to supply the spatial texture. Calibration adjusts its
+the selected contour, to supply the spatial texture. LMNet runs 12 steps for
+each proposal; `--proposal-steps` sets another count. Calibration adjusts its
 mean, rim-to-core trend, coarse variation and excessive sharpness at the liver
 interface when the profile includes a reference liver mask. With that mask,
 reference voxels within 2 mm of the liver surface do not contribute to the

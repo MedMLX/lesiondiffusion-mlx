@@ -84,7 +84,7 @@ def main() -> None:
     synth.add_argument(
         "--proposal-steps",
         type=int,
-        help="LMNet steps for the contour proposals instead of --steps",
+        help="LMNet steps for each contour proposal; 12 when omitted",
     )
     synth.add_argument("--seed", type=int, required=True)
     synth.add_argument("--output", type=Path, required=True)
