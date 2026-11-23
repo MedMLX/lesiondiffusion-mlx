@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Mlx
+    from medmlx_core.typing import MlxRuntime
 
 
 def main() -> None:
@@ -47,7 +47,7 @@ def main() -> None:
     from lesiondiffusion_mlx.medmlx import load_stage
     from lesiondiffusion_mlx.mlx_model import LINET_CONFIG, LMNET_CONFIG, LdmUnet
 
-    mx = cast("Mlx", import_mlx())
+    mx = cast("MlxRuntime", import_mlx())
     import mlx.core as native
     from mlx.core.metal import start_capture, stop_capture
 

@@ -9,13 +9,14 @@ import numpy as np
 import pytest
 
 from lesiondiffusion_mlx._arrays import HostArray
-from lesiondiffusion_mlx._typing import ArrayConstructor
 from lesiondiffusion_mlx.mlx_sampling import Dpmpp2mSampler
 from tests._fixture_models import sampling_denoiser, sampling_inputs
 from tests.test_equivalence import assert_numerical
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Array, Mlx
+    from medmlx_core.typing import MlxRuntime
+
+    from lesiondiffusion_mlx._typing import Array
 
 FIXTURE = Path(__file__).parent / "fixtures/darwin-arm64/dpmpp_2m.npz"
 
@@ -27,7 +28,7 @@ def _host(array: Array) -> HostArray:
 
 @pytest.mark.parametrize("stage", ["lmnet", "linet"])
 @pytest.mark.parametrize("steps", [4, 8, 25])
-def test_dpm_midpoint_matches_diffusers_trajectory(stage: str, steps: int, mx: Mlx) -> None:
+def test_dpm_midpoint_matches_diffusers_trajectory(stage: str, steps: int, mx: MlxRuntime) -> None:
     """Preserve first/second/final order and known regions on the real alpha schedules."""
     with np.load(FIXTURE, allow_pickle=False) as archive:
         prefix = f"{stage}_{steps}."
@@ -39,7 +40,7 @@ def test_dpm_midpoint_matches_diffusers_trajectory(stage: str, steps: int, mx: M
                 if key.startswith(prefix)
             },
         )
-    array = cast(ArrayConstructor, mx.array)
+    array = mx.array
     sampler = Dpmpp2mSampler(array(data["alphas_cumprod"]), mx, steps)
     np.testing.assert_array_equal(np.array(sampler.timesteps), data["timesteps"])
     image = array(data["conditioning_image"])
@@ -67,10 +68,10 @@ def test_dpm_midpoint_matches_diffusers_trajectory(stage: str, steps: int, mx: M
 
 
 @pytest.mark.parametrize("inpainting", [False, True])
-def test_prepared_dpm_keeps_history_rng_and_known_region(inpainting: bool, mx: Mlx) -> None:
+def test_prepared_dpm_keeps_history_rng_and_known_region(inpainting: bool, mx: MlxRuntime) -> None:
     """Compilation retains an evolving prediction history and exactly one noise draw."""
     fixture = sampling_inputs(71, inpainting=inpainting)
-    array = cast(ArrayConstructor, mx.array)
+    array = mx.array
     image, condition = array(fixture["image"]), array(fixture["condition"])
     mask = array(fixture["mask"]) if inpainting else None
     sampler = Dpmpp2mSampler(array(fixture["alphas"]), mx, 4)

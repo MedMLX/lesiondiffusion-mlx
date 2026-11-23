@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from lesiondiffusion_mlx._dpm import Dpmpp2mSampler as Dpmpp2mSampler
-from lesiondiffusion_mlx._typing import ArrayConstructor
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Array, Mlx
+    from medmlx_core.typing import MlxRuntime
+
+    from lesiondiffusion_mlx._typing import Array
 
 from lesiondiffusion_mlx._schedules import lesion_diffusion_timesteps
 
@@ -24,7 +25,7 @@ class DdimSampler:
     ``eta=1`` (the default) matches upstream's stochastic sampling.
     """
 
-    def __init__(self, alphas_cumprod: Array, mx: Mlx, steps: int, *, eta: float = 1.0):
+    def __init__(self, alphas_cumprod: Array, mx: MlxRuntime, steps: int, *, eta: float = 1.0):
         """Precompute per-step coefficients.
 
         Args:
@@ -42,7 +43,7 @@ class DdimSampler:
         self.timesteps = lesion_diffusion_timesteps(steps, alphas_cumprod.shape[0])
         # Source LINet stores its schedule in fp16, then creates fp32 scalar
         # broadcast tensors in p_sample_ddim. Preserve that rounded schedule.
-        alphas = alphas_cumprod[cast(ArrayConstructor, mx.array)(self.timesteps, dtype=mx.int32)]
+        alphas = alphas_cumprod[mx.array(self.timesteps, dtype=mx.int32)]
         previous = mx.concatenate([alphas_cumprod[:1], alphas[:-1]])
         self.alphas = alphas.astype(mx.float32)
         self.previous = previous.astype(mx.float32)

@@ -34,13 +34,21 @@ class NiftiHeader(Protocol):
         """Set spatial and temporal unit names."""
         ...
 
+    def set_sform(self, affine: HostArray, code: int) -> None:
+        """Set the sform affine and code."""
+        ...
+
+    def set_qform(self, affine: HostArray, code: int) -> None:
+        """Set the qform affine and code."""
+        ...
+
     def set_data_dtype(self, dtype: type[np.generic]) -> None:
         """Set the stored image dtype."""
         ...
 
 
 class HeaderFactory(Protocol):
-    def from_header(self, header: NiftiHeader) -> NiftiHeader:
+    def from_header(self, header: object) -> NiftiHeader:
         """Construct a NIfTI header from an existing header."""
         ...
 

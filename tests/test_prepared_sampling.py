@@ -7,24 +7,25 @@ from typing import TYPE_CHECKING, cast
 import numpy as np
 import pytest
 
-from lesiondiffusion_mlx._typing import ArrayConstructor
 from lesiondiffusion_mlx.mlx_model import LdmUnet, UnetConfig
 from lesiondiffusion_mlx.mlx_sampling import DdimSampler
 from tests._fixture_models import sampling_denoiser, sampling_inputs, unet_weights
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Array, Dtype, Mlx
+    from medmlx_core.typing import MlxRuntime
+
+    from lesiondiffusion_mlx._typing import Array, Dtype
     from tests._fixture_models import ArrayFactory
 
 
 @pytest.mark.parametrize("inpainting", [False, True])
 @pytest.mark.parametrize("eta", [0.0, 1.0])
 def test_prepared_sampling_keeps_rng_progression_and_unmasked_voxels(
-    inpainting: bool, eta: float, mx: Mlx
+    inpainting: bool, eta: float, mx: MlxRuntime
 ) -> None:
     """Compiled attempts retain the source draws, schedule and inpainting boundary."""
     fixture = sampling_inputs(71, inpainting=inpainting)
-    array = cast(ArrayConstructor, mx.array)
+    array = mx.array
     condition, image = array(fixture["condition"]), array(fixture["image"])
     mask = array(fixture["mask"]) if inpainting else None
     sampler = DdimSampler(array(fixture["alphas"]), mx, 4, eta=eta)
@@ -54,7 +55,7 @@ def test_prepared_sampling_keeps_rng_progression_and_unmasked_voxels(
 
 @pytest.mark.parametrize("dtype_name", ["float32", "float16"])
 def test_context_bindings_do_not_cache_evolving_image_or_other_request(
-    dtype_name: str, mx: Mlx
+    dtype_name: str, mx: MlxRuntime
 ) -> None:
     """Two bindings on one model retain their own context while the image evolves."""
     dtype = getattr(mx, dtype_name)
@@ -67,7 +68,7 @@ def test_context_bindings_do_not_cache_evolving_image_or_other_request(
         fused_attention=True,
     )
     rng = np.random.default_rng(31)
-    array = cast(ArrayConstructor, mx.array)
+    array = mx.array
     x = array(rng.normal(size=(1, 4, 8, 8, 8)).astype(np.float32))
     first = array(rng.normal(size=(1, 3, 6)).astype(np.float32))
     second = array(rng.normal(size=(1, 5, 6)).astype(np.float32))

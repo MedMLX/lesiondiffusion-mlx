@@ -28,18 +28,19 @@ from lesiondiffusion_mlx._nax_conv import (
     pack_upsample_weight,
     pack_weight,
 )
-from lesiondiffusion_mlx._typing import ArrayConstructor
 from lesiondiffusion_mlx.mlx_model import SourceLayers
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Array, Mlx
+    from medmlx_core.typing import MlxRuntime
+
+    from lesiondiffusion_mlx._typing import Array
 
 _ACCUMULATION_EPS = 8 * 2.0**-23
 _OPERAND_ROUNDING = 2.0**-11
 _SPLIT_ERROR = 4 * 2.0**-22
 
 
-def _host(mx: Mlx, array: Array) -> NumericArray:
+def _host(mx: MlxRuntime, array: Array) -> NumericArray:
     """Convert a native array to a float64 host comparison array."""
     return cast(NumericArray, np.array(array.astype(mx.float32))).astype(np.float64)
 
@@ -50,11 +51,11 @@ def _half_spacing(values: NumericArray) -> NumericArray:
 
 
 def _case(
-    mx: Mlx, shape: tuple[int, ...], out_channels: int, kernel: int, seed: int
+    mx: MlxRuntime, shape: tuple[int, ...], out_channels: int, kernel: int, seed: int
 ) -> tuple[Array, Array, Array]:
     """Create seeded native convolution inputs and weights."""
     rng = np.random.default_rng(seed)
-    create = cast(ArrayConstructor, mx.array)
+    create = mx.array
     channels = shape[1]
     x = create(rng.normal(size=shape).astype(np.float16))
     scale = (channels * kernel**3) ** -0.5
@@ -68,7 +69,7 @@ def _case(
 
 
 def _reference(
-    mx: Mlx, x: Array, weight: Array, bias: Array | None, padding: int, stride: int = 1
+    mx: MlxRuntime, x: Array, weight: Array, bias: Array | None, padding: int, stride: int = 1
 ) -> tuple[NumericArray, NumericArray, NumericArray]:
     """FP32 sum without bias, FP32 result and sum of absolute terms (TF32 is disabled)."""
 
@@ -89,14 +90,14 @@ def _reference(
 
     def absolute(value: Array) -> Array:
         """Return absolute host values as a native array."""
-        return cast(ArrayConstructor, mx.array)(np.abs(_host(mx, value)).astype(np.float32))
+        return mx.array(np.abs(_host(mx, value)).astype(np.float32))
 
     magnitude = convolve(absolute(x), absolute(weight), None if bias is None else absolute(bias))
     return products, result, magnitude
 
 
 def _assert_single_rounding(
-    mx: Mlx, actual: Array, x: Array, weight: Array, bias: Array, stride: int = 1
+    mx: MlxRuntime, actual: Array, x: Array, weight: Array, bias: Array, stride: int = 1
 ) -> None:
     """Check native half output against the single-rounding reference."""
     _, expected, magnitude = _reference(mx, x, weight, bias, padding=1, stride=stride)
@@ -104,7 +105,7 @@ def _assert_single_rounding(
     assert np.all(error <= _half_spacing(expected) + _ACCUMULATION_EPS * magnitude)
 
 
-def _skip_without_nax(mx: Mlx) -> None:
+def _skip_without_nax(mx: MlxRuntime) -> None:
     """Skip neural-accelerator cases when the required device is unavailable."""
     if not nax_available(mx):
         pytest.skip("NAX convolution needs an M5-class GPU and macOS 26.2")
@@ -113,11 +114,11 @@ def _skip_without_nax(mx: Mlx) -> None:
 @pytest.mark.parametrize("upsample", [False, True])
 @pytest.mark.parametrize("with_residual", [False, True])
 def test_nax_scales_overflowing_branch_before_store_and_residual(
-    mx: Mlx, upsample: bool, with_residual: bool
+    mx: MlxRuntime, upsample: bool, with_residual: bool
 ) -> None:
     """A 75000-valued branch stays finite without scaling its existing residual."""
     _skip_without_nax(mx)
-    create = cast(ArrayConstructor, mx.array)
+    create = mx.array
     x = mx.zeros((1, 16, 2, 2, 2), dtype=mx.float16)
     weight = mx.zeros((1, 16, 3, 3, 3), dtype=mx.float16)
     # An FP32 convolution accumulator can exceed half range before the store.
@@ -152,7 +153,7 @@ def test_nax_scales_overflowing_branch_before_store_and_residual(
     ],
 )
 def test_nax_conv_accumulates_in_fp32_and_rounds_once(
-    mx: Mlx, shape: tuple[int, ...], out_channels: int, stride: int
+    mx: MlxRuntime, shape: tuple[int, ...], out_channels: int, stride: int
 ) -> None:
     """Verify FP32 convolution accumulation and one final half rounding."""
     _skip_without_nax(mx)
@@ -171,14 +172,14 @@ def test_nax_conv_accumulates_in_fp32_and_rounds_once(
 @pytest.mark.parametrize("split", [False, True])
 @pytest.mark.parametrize("output_scale", [1.0, 0.25])
 def test_nax_conv_adds_batch_bias_and_residual_before_rounding(
-    mx: Mlx, split: bool, output_scale: float
+    mx: MlxRuntime, split: bool, output_scale: float
 ) -> None:
     """Add batch bias and residual before the final rounding step."""
     _skip_without_nax(mx)
     channels = 512 if split else 32
     x, weight, _ = _case(mx, (2, channels, 4, 4, 4), 64, 3, seed=channels)
     rng = np.random.default_rng(1)
-    create = cast(ArrayConstructor, mx.array)
+    create = mx.array
     bias = create(rng.normal(size=(2, 64)).astype(np.float32))
     residual = create(rng.normal(size=(2, 64, 4, 4, 4)).astype(np.float16))
     actual = nax_conv3d(
@@ -193,7 +194,7 @@ def test_nax_conv_adds_batch_bias_and_residual_before_rounding(
     assert np.all(error <= _half_spacing(expected) + _ACCUMULATION_EPS * magnitude * output_scale)
 
 
-def test_nax_upsample_conv_matches_conv_of_nearest_upsampling(mx: Mlx) -> None:
+def test_nax_upsample_conv_matches_conv_of_nearest_upsampling(mx: MlxRuntime) -> None:
     """Compare fused upsample convolution with explicit nearest upsampling."""
     _skip_without_nax(mx)
     x, weight, bias = _case(mx, (2, 32, 3, 5, 4), 64, 3, seed=21)
@@ -261,12 +262,12 @@ def _assert_near_fp32(
     ],
 )
 def test_nax_conv_fp32_exact_mode_matches_float64(
-    mx: Mlx, shape: tuple[int, ...], out_channels: int, stride: int
+    mx: MlxRuntime, shape: tuple[int, ...], out_channels: int, stride: int
 ) -> None:
     """Compare split-FP16 FP32 convolution with a float64 reference."""
     _skip_without_nax(mx)
     x, weight, bias = _fp32_case(shape, out_channels, seed=sum(shape))
-    create = cast(ArrayConstructor, mx.array)
+    create = mx.array
     packed = pack_weight(create(weight.astype(np.float32)), mx)
     actual = nax_conv3d(
         create(x.astype(np.float32)), packed, create(bias.astype(np.float32)), stride=stride, mx=mx
@@ -281,14 +282,14 @@ def test_nax_conv_fp32_exact_mode_matches_float64(
     )
 
 
-def test_nax_conv_fp32_exact_mode_upsamples_with_bias_and_residual(mx: Mlx) -> None:
+def test_nax_conv_fp32_exact_mode_upsamples_with_bias_and_residual(mx: MlxRuntime) -> None:
     """Compare fused FP32 upsampling, bias, and residual with a reference."""
     _skip_without_nax(mx)
     x, weight, _ = _fp32_case((2, 32, 3, 5, 4), 16, seed=23)
     rng = np.random.default_rng(23)
     bias = rng.normal(size=(2, 16)).astype(np.float32).astype(np.float64)
     residual = rng.normal(size=(2, 16, 6, 10, 8)).astype(np.float32).astype(np.float64)
-    create = cast(ArrayConstructor, mx.array)
+    create = mx.array
     actual = nax_conv3d(
         create(x.astype(np.float32)),
         pack_upsample_weight(create(weight.astype(np.float32)), mx),
@@ -306,10 +307,10 @@ def test_nax_conv_fp32_exact_mode_upsamples_with_bias_and_residual(mx: Mlx) -> N
     _assert_near_fp32(_host(mx, actual), expected, 2 * magnitude)
 
 
-def test_native_norm_silu_conv_fuses_normalization_shift_and_residual(mx: Mlx) -> None:
+def test_native_norm_silu_conv_fuses_normalization_shift_and_residual(mx: MlxRuntime) -> None:
     """Compare fused normalization, activation, shift, and residual with the reference."""
     rng = np.random.default_rng(13)
-    create = cast(ArrayConstructor, mx.array)
+    create = mx.array
     x, weight, bias = _case(mx, (2, 32, 4, 5, 6), 64, 3, seed=13)
     weights = {
         "norm.weight": create(rng.normal(size=(32,)).astype(np.float16)),
@@ -338,10 +339,10 @@ def test_native_norm_silu_conv_fuses_normalization_shift_and_residual(mx: Mlx) -
     assert np.all(error <= bound)
 
 
-def test_native_fp16_dense_rounds_once(mx: Mlx) -> None:
+def test_native_fp16_dense_rounds_once(mx: MlxRuntime) -> None:
     """Verify native FP16 dense layers round after accumulation."""
     rng = np.random.default_rng(17)
-    create = cast(ArrayConstructor, mx.array)
+    create = mx.array
     x = rng.normal(size=(2, 33, 48)).astype(np.float16)
     weight = (rng.normal(size=(40, 48)) / 7).astype(np.float16)
     bias = rng.normal(size=(40,)).astype(np.float16)
@@ -359,7 +360,9 @@ def test_native_fp16_dense_rounds_once(mx: Mlx) -> None:
 
 
 @pytest.mark.parametrize("with_bias", [True, False])
-def test_pointwise_fp16_convolution_rounds_product_then_bias(mx: Mlx, with_bias: bool) -> None:
+def test_pointwise_fp16_convolution_rounds_product_then_bias(
+    mx: MlxRuntime, with_bias: bool
+) -> None:
     """Verify pointwise half convolution rounding around bias addition."""
     x, weight, bias = _case(mx, (2, 48, 3, 5, 7), 40, 1, seed=11)
     weights = {"proj.weight": weight} | ({"proj.bias": bias} if with_bias else {})
@@ -408,7 +411,7 @@ def _attention_reference(
     ],
 )
 def test_flash_attention_matches_float64_softmax(
-    mx: Mlx,
+    mx: MlxRuntime,
     monkeypatch: pytest.MonkeyPatch,
     kernel: str,
     batch: int,
@@ -422,7 +425,7 @@ def test_flash_attention_matches_float64_softmax(
     else:
         monkeypatch.setenv(DISABLE_ENV, "0")
     rng = np.random.default_rng(length + keys)
-    create = cast(ArrayConstructor, mx.array)
+    create = mx.array
     # Scaled inputs give peaked softmax rows, exercising the running maximum.
     q, k, v = (
         rng.normal(size=(batch, size, heads * 32)) * scale

@@ -44,7 +44,9 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Array, MetalKernel, Mlx
+    from medmlx_core.typing import MetalKernel, MlxRuntime
+
+    from lesiondiffusion_mlx._typing import Array
 
 # Set to "0" to force MLX's own conv3d and the SIMD FP32 attention kernel, e.g.
 # to compare against the NAX kernels.
@@ -298,7 +300,7 @@ _SPLIT_MIN_CHANNELS = 512
 _PACK_THREADS = 256
 
 
-def nax_available(mx: Mlx) -> bool:
+def nax_available(mx: MlxRuntime) -> bool:
     """Return whether this process should use the NAX convolution.
 
     Requires an Apple GPU of generation 17 or newer (M5 family), which carries
@@ -328,7 +330,7 @@ def nax_eligible(weight: Array) -> bool:
     return weight.ndim == 5 and tuple(weight.shape[2:]) == (3, 3, 3)
 
 
-def _pad_channels(weight: Array, mx: Mlx) -> Array:
+def _pad_channels(weight: Array, mx: MlxRuntime) -> Array:
     """Zero-pad an ``(O, C, 3, 3, 3)`` weight to the GEMM tile sizes (C to 16, O as below)."""
     out_channels, in_channels = int(weight.shape[0]), int(weight.shape[1])
     # At most 16 outputs use 16-column tiles; LMNet's full-resolution layers
@@ -340,14 +342,14 @@ def _pad_channels(weight: Array, mx: Mlx) -> Array:
     )
 
 
-def _split_planes(taps: Array, mx: Mlx) -> Array:
+def _split_planes(taps: Array, mx: MlxRuntime) -> Array:
     """Stack FP32 ``(..., R, O)`` as FP16 ``(..., 2 R, O)``: hi rows, then 2^11-scaled lo rows."""
     hi = taps.astype(mx.float16)
     lo = ((taps - hi.astype(mx.float32)) * 2048.0).astype(mx.float16)
     return mx.concatenate([hi, lo], axis=-2)
 
 
-def pack_weight(weight: Array, mx: Mlx) -> Array:
+def pack_weight(weight: Array, mx: MlxRuntime) -> Array:
     """Reorder a Torch ``(O, C, 3, 3, 3)`` weight to contiguous ``(27 * C', O')`` taps.
 
     ``C'`` rounds ``C`` up to a multiple of 16; ``O'`` is 16 when ``O <= 16`` and
@@ -364,7 +366,7 @@ def pack_weight(weight: Array, mx: Mlx) -> Array:
     return mx.contiguous(_split_planes(taps, mx) if exact else taps)
 
 
-def pack_upsample_weight(weight: Array, mx: Mlx) -> Array:
+def pack_upsample_weight(weight: Array, mx: MlxRuntime) -> Array:
     """Fold a Torch ``(O, C, 3, 3, 3)`` weight into eight 2x2x2 parity filters.
 
     After nearest 2x upsampling, output index ``2 m + p`` of one axis reads
@@ -406,7 +408,7 @@ def pack_upsample_weight(weight: Array, mx: Mlx) -> Array:
 
 
 @lru_cache(maxsize=2)
-def _kernels(mx: Mlx, scaled: bool = False) -> tuple[MetalKernel, MetalKernel, MetalKernel]:
+def _kernels(mx: MlxRuntime, scaled: bool = False) -> tuple[MetalKernel, MetalKernel, MetalKernel]:
     """Reuse kernels; branch scaling has separate source so the default stays unchanged."""
     source, reduction = _SOURCE, _REDUCE
     conv_inputs, reduce_inputs = ["x", "w", "bias", "res"], ["partials", "bias", "res"]
@@ -459,7 +461,7 @@ def nax_conv3d(
     upsample: bool = False,
     output_scale: float = 1.0,
     residual: Array | None = None,
-    mx: Mlx,
+    mx: MlxRuntime,
 ) -> Array:
     """Padding-1 3x3x3 convolution of NCDHW ``x``, in its dtype.
 

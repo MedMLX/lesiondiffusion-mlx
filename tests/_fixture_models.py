@@ -14,7 +14,9 @@ import numpy as np
 from lesiondiffusion_mlx._arrays import FloatArray, HostArray
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Array, Mlx
+    from medmlx_core.typing import MlxRuntime
+
+    from lesiondiffusion_mlx._typing import Array
 
 
 class ArrayFactory[T, D](Protocol):
@@ -197,7 +199,7 @@ def sampling_inputs(seed: int, *, inpainting: bool) -> dict[str, HostArray]:
     return result
 
 
-def sampling_denoiser(mx: Mlx) -> Callable[[Array, Array, Array | None], Array]:
+def sampling_denoiser(mx: MlxRuntime) -> Callable[[Array, Array, Array | None], Array]:
     """Build a deterministic denoiser for sampling fixtures."""
 
     def denoiser(x: Array, timestep: Array, condition: Array | None) -> Array:

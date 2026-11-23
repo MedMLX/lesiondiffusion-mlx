@@ -7,12 +7,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Array, ArrayValue, HostArray, Mlx, TokenizerContract
+    from medmlx_core.typing import MlxRuntime
+
+    from lesiondiffusion_mlx._typing import Array, HostArray, TokenizerContract
 
 import numpy as np
 from medmlx_core.errors import InvalidInputError, ModelExecutionError
 
-from lesiondiffusion_mlx._typing import ArrayConstructor
 from lesiondiffusion_mlx.mlx_model import BiomedTextEncoder, VqAutoencoder
 
 # Crop extents in source axis order (Z, Y, X), in voxels of the 1 mm grid: LMNet
@@ -69,7 +70,7 @@ def source_crop(mask: HostArray, shape: tuple[int, int, int]) -> tuple[slice, sl
     return slices[0], slices[1], slices[2]
 
 
-def piecewise_ct(array: Array, mx: Mlx, *, inverse: bool = False) -> Array:
+def piecewise_ct(array: Array, mx: MlxRuntime, *, inverse: bool = False) -> Array:
     """Apply the source's four-knot CT intensity transform on the Metal GPU.
 
     Map HU landmarks (-1000, -200, 200, 1000) to (0, 0.2, 0.8, 1) with
@@ -96,7 +97,7 @@ def piecewise_ct(array: Array, mx: Mlx, *, inverse: bool = False) -> Array:
     return mx.where(array >= inputs[-1], outputs[-1], result)
 
 
-def encode_source(model: VqAutoencoder, array: Array, mx: Mlx) -> Array:
+def encode_source(model: VqAutoencoder, array: Array, mx: MlxRuntime) -> Array:
     """Encode a normalized volume ``(B, C, D, H, W)`` to its VQ latent, evaluated eagerly.
 
     ``array`` holds ``piecewise_ct`` output in [0, 1]. The latent has half the
@@ -113,7 +114,7 @@ def encode_attributes(
     attributes: Mapping[str, object],
     model: BiomedTextEncoder,
     tokenizer_path: Path,
-    mx: Mlx,
+    mx: MlxRuntime,
 ) -> Array:
     """Embed each attribute value as one BiomedCLIP text vector for cross-attention.
 
@@ -130,10 +131,7 @@ def encode_attributes(
     tokenizer.enable_truncation(max_length=256)
     tokenizer.enable_padding(length=256, pad_id=0, pad_token="[PAD]")
     tokens = tokenizer.encode_batch([str(value) for value in attributes.values()])
-    # Tokenizer IDs are nested numeric lists; list invariance loses the recursive type.
-    token_ids = cast(ArrayConstructor, mx.array)(
-        cast("ArrayValue", [token.ids for token in tokens]), dtype=mx.int32
-    )
+    token_ids = mx.array([token.ids for token in tokens], dtype=mx.int32)
     encoded = model(token_ids)
     mx.eval(encoded)
     return encoded[None]

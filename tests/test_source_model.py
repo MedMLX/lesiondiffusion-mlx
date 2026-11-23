@@ -19,7 +19,9 @@ from torch import nn
 from tests._torch import from_numpy
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Array, Mlx
+    from medmlx_core.typing import MlxRuntime
+
+    from lesiondiffusion_mlx._typing import Array
 
 
 import numpy as np
@@ -28,7 +30,6 @@ import pytest
 from lesiondiffusion_mlx import DdimSampler, lesion_diffusion_timesteps
 from lesiondiffusion_mlx._arrays import NumericArray
 from lesiondiffusion_mlx._nifti import nib
-from lesiondiffusion_mlx._typing import ArrayConstructor
 from lesiondiffusion_mlx.mlx_model import (
     LMNET_CONFIG,
     LdmUnet,
@@ -90,24 +91,23 @@ def admitted_source() -> Path:
 
 
 @pytest.fixture
-def oracle(monkeypatch: PathPatcher, mx: Mlx, admitted_source: Path) -> tuple[TorchModule, Mlx]:
+def oracle(
+    monkeypatch: PathPatcher, mx: MlxRuntime, admitted_source: Path
+) -> tuple[TorchModule, MlxRuntime]:
     """Provide reference Torch and native MLX runtimes for comparison."""
     torch = pytest.importorskip("torch")
     monkeypatch.syspath_prepend(str(admitted_source))
     return cast(TorchModule, torch), mx
 
 
-def mlx_weights(model: nn.Module, mx: Mlx) -> dict[str, Array]:
+def mlx_weights(model: nn.Module, mx: MlxRuntime) -> dict[str, Array]:
     """Convert source model weights to native arrays."""
-    return {
-        key: cast(ArrayConstructor, mx.array)(value.detach().numpy())
-        for key, value in model.state_dict().items()
-    }
+    return {key: mx.array(value.detach().numpy()) for key, value in model.state_dict().items()}
 
 
 @pytest.mark.parametrize("fused_attention", [False, True])
 def test_unet_matches_pinned_source_nonzero_weights(
-    oracle: tuple[TorchModule, Mlx], fused_attention: bool
+    oracle: tuple[TorchModule, MlxRuntime], fused_attention: bool
 ) -> None:
     """Compare native UNet output with pinned source using nonzero weights."""
     torch, mx = oracle
@@ -139,15 +139,15 @@ def test_unet_matches_pinned_source_nonzero_weights(
         expected = source(x, timesteps, condition).numpy()
     native = LdmUnet(mlx_weights(source, mx), mx, LMNET_CONFIG, fused_attention=fused_attention)
     actual = native(
-        cast(ArrayConstructor, mx.array)(x.numpy()),
-        cast(ArrayConstructor, mx.array)(timesteps.numpy()),
-        cast(ArrayConstructor, mx.array)(condition.numpy()),
+        mx.array(x.numpy()),
+        mx.array(timesteps.numpy()),
+        mx.array(condition.numpy()),
     )
     mx.eval(actual)
     np.testing.assert_allclose(cast(NumericArray, np.array(actual)), expected, atol=3e-5, rtol=3e-4)
 
 
-def test_vq_encoder_decoder_match_source(oracle: tuple[TorchModule, Mlx]) -> None:
+def test_vq_encoder_decoder_match_source(oracle: tuple[TorchModule, MlxRuntime]) -> None:
     """Compare native VQ encoding and decoding with the source."""
     torch, mx = oracle
     module = importlib.import_module("ldm.modules.diffusionmodules.model")
@@ -186,7 +186,7 @@ def test_vq_encoder_decoder_match_source(oracle: tuple[TorchModule, Mlx]) -> Non
     with torch.no_grad():
         z = quant_conv(encoder(x))
         expected = decoder(post_quant(z), use_checkpoint=False).numpy()
-    actual_z = native.encode(cast(ArrayConstructor, mx.array)(x.numpy()))
+    actual_z = native.encode(mx.array(x.numpy()))
     actual = native.decode(actual_z, quantize=False)
     mx.eval(actual, actual_z)
     np.testing.assert_allclose(
@@ -210,7 +210,7 @@ def test_vq_encoder_decoder_match_source(oracle: tuple[TorchModule, Mlx]) -> Non
     ],
 )
 def test_source_half_convolution_preserves_source_rounding(
-    mx: Mlx,
+    mx: MlxRuntime,
     channels: int,
     outputs: int,
     kernel: tuple[int, int, int],
@@ -231,13 +231,11 @@ def test_source_half_convolution_preserves_source_rounding(
             padding=padding,
             stride=stride,
         ).numpy()
-    weights = {"conv.weight": cast(ArrayConstructor, mx.array)(weight)}
+    weights = {"conv.weight": mx.array(weight)}
     if bias is not None:
-        weights["conv.bias"] = cast(ArrayConstructor, mx.array)(bias)
+        weights["conv.bias"] = mx.array(bias)
     native = SourceLayers(weights, mx)
-    actual = native.conv(
-        cast(ArrayConstructor, mx.array)(x), "conv", padding=padding, stride=stride
-    )
+    actual = native.conv(mx.array(x), "conv", padding=padding, stride=stride)
     mx.eval(actual)
     np.testing.assert_array_equal(np.array(actual).view(np.uint16), expected.view(np.uint16))
 
@@ -260,7 +258,7 @@ def test_source_half_convolution_preserves_source_rounding(
     ],
 )
 def test_source_half_group_norm_rounds_after_affine(
-    oracle: tuple[TorchModule, Mlx], shape: tuple[int, int, int, int, int]
+    oracle: tuple[TorchModule, MlxRuntime], shape: tuple[int, int, int, int, int]
 ) -> None:
     """Match source half group-normalization rounding after affine terms."""
     torch, mx = oracle
@@ -275,12 +273,12 @@ def test_source_half_group_norm_rounds_after_affine(
         expected = source(from_numpy(x)).float().numpy()
     native = SourceLayers(
         {
-            "norm.weight": cast(ArrayConstructor, mx.array)(weight),
-            "norm.bias": cast(ArrayConstructor, mx.array)(bias),
+            "norm.weight": mx.array(weight),
+            "norm.bias": mx.array(bias),
         },
         mx,
     )
-    actual = native.norm(cast(ArrayConstructor, mx.array)(x), "norm", groups=16, eps=1e-6)
+    actual = native.norm(mx.array(x), "norm", groups=16, eps=1e-6)
     mx.eval(actual)
     np.testing.assert_allclose(
         cast(NumericArray, np.array(actual, dtype=np.float32)), expected, atol=1e-3, rtol=0
@@ -289,14 +287,14 @@ def test_source_half_group_norm_rounds_after_affine(
 
 @pytest.mark.parametrize("reverse_width", [False, True])
 def test_source_half_group_norm_keeps_strided_group_membership(
-    mx: Mlx, reverse_width: bool
+    mx: MlxRuntime, reverse_width: bool
 ) -> None:
     """Shared contiguous inputs must preserve groups across batch and reversed views."""
     rng = np.random.default_rng(42)
     host = rng.normal(size=(2, 96, 8, 32, 32)).astype(np.float16)
     weight = rng.normal(size=96).astype(np.float16)
     bias = rng.normal(size=96).astype(np.float16)
-    create = cast(ArrayConstructor, mx.array)
+    create = mx.array
     x = mx.transpose(create(np.ascontiguousarray(host.transpose(0, 2, 3, 4, 1))), (0, 4, 1, 2, 3))
     if reverse_width:
         x, host = x[..., ::-1], host[..., ::-1]
@@ -316,7 +314,7 @@ def test_source_half_group_norm_keeps_strided_group_membership(
     )
 
 
-def test_half_quantization_matches_pinned_source(oracle: tuple[TorchModule, Mlx]) -> None:
+def test_half_quantization_matches_pinned_source(oracle: tuple[TorchModule, MlxRuntime]) -> None:
     """Compare half-precision quantization with the pinned source."""
     torch, mx = oracle
     source_file = SOURCE / "ldm/models/autoencoder.py"
@@ -343,16 +341,14 @@ def test_half_quantization_matches_pinned_source(oracle: tuple[TorchModule, Mlx]
     source.load_state_dict({"embedding.weight": from_numpy(codebook)})
     with torch.no_grad():
         expected = source(from_numpy(z))[0].numpy()
-    native = VqAutoencoder(
-        {"quantize.embedding.weight": cast(ArrayConstructor, mx.array)(codebook)}, mx
-    )
-    actual = native.quantize(cast(ArrayConstructor, mx.array)(z), chunk_size=37)
+    native = VqAutoencoder({"quantize.embedding.weight": mx.array(codebook)}, mx)
+    actual = native.quantize(mx.array(z), chunk_size=37)
     mx.eval(actual)
     np.testing.assert_array_equal(cast(NumericArray, np.array(actual)), expected)
 
 
 def test_ddim_matches_source_equations_and_preserves_unmasked_latent(
-    oracle: tuple[TorchModule, Mlx],
+    oracle: tuple[TorchModule, MlxRuntime],
 ) -> None:
     """Match DDIM source equations and preserve the unmasked latent."""
     torch, mx = oracle
@@ -364,7 +360,7 @@ def test_ddim_matches_source_equations_and_preserves_unmasked_latent(
     mask = np.zeros((1, 1, 4, 4, 4), dtype=np.float32)
     mask[:, :, 1:3, 1:3, 1:3] = 1
     noise = tuple(rng.normal(size=x0.shape).astype(np.float32) for _ in range(10))
-    sampler = DdimSampler(cast(ArrayConstructor, mx.array)(alphas), mx, 10)
+    sampler = DdimSampler(mx.array(alphas), mx, 10)
 
     def denoiser(x: Array, t: Array, context: Array | None) -> Array:
         """Return deterministic noise for the DDIM reference case."""
@@ -374,10 +370,10 @@ def test_ddim_matches_source_equations_and_preserves_unmasked_latent(
     actual = sampler(
         denoiser,
         None,
-        cast(ArrayConstructor, mx.array)(x0),
-        initial_noise=cast(ArrayConstructor, mx.array)(initial),
-        step_noise=tuple(cast(ArrayConstructor, mx.array)(n) for n in noise),
-        mask=cast(ArrayConstructor, mx.array)(mask),
+        mx.array(x0),
+        initial_noise=mx.array(initial),
+        step_noise=tuple(mx.array(n) for n in noise),
+        mask=mx.array(mask),
     )
     x, reference, mask_tensor = (
         from_numpy(initial),
@@ -410,7 +406,7 @@ def test_ddim_matches_source_equations_and_preserves_unmasked_latent(
 
 
 def test_ddim_fp16_schedule_matches_pinned_source_parameters(
-    oracle: tuple[TorchModule, Mlx],
+    oracle: tuple[TorchModule, MlxRuntime],
 ) -> None:
     """Compare FP16 DDIM schedule values with pinned source parameters."""
     torch, mx = oracle
@@ -423,7 +419,7 @@ def test_ddim_fp16_schedule_matches_pinned_source_parameters(
             1.0,
             verbose=False,
         )
-    native = DdimSampler(cast(ArrayConstructor, mx.array)(alphas.numpy()), mx, 10)
+    native = DdimSampler(mx.array(alphas.numpy()), mx, 10)
     np.testing.assert_allclose(
         cast(NumericArray, np.array(native.sigmas)), np.asarray(sigma), atol=1e-7, rtol=1e-6
     )

@@ -35,7 +35,9 @@ from medmlx_core.errors import (
 from medmlx_core.outputs import RunResult as _RunResult
 from medmlx_core.outputs import artifact
 from medmlx_core.runtime import import_mlx
+from medmlx_core.volumes import NiftiHeader, StoredScalar, Volume, read_volume, write_like
 from medmlx_core.weights import weights_dir, weights_revision
+from numpy.typing import NDArray
 
 from lesiondiffusion_mlx._arrays import BoolArray, FloatArray, HostArray, NumericArray
 from lesiondiffusion_mlx._nax_conv import nax_available
@@ -45,10 +47,11 @@ from lesiondiffusion_mlx._scaled_vq import ScaledVqDecoder
 from lesiondiffusion_mlx._schedules import dpm_solver_timesteps, is_integer
 from lesiondiffusion_mlx._slab_vq import SlabVqAutoencoder, require_slab_capacity
 from lesiondiffusion_mlx._spatial import resize_nearest
-from lesiondiffusion_mlx._typing import ArrayConstructor
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Array, Dtype, Mlx
+    from medmlx_core.typing import MlxRuntime
+
+    from lesiondiffusion_mlx._typing import Array, Dtype
 
 from lesiondiffusion_mlx.mlx_model import (
     LINET_CONFIG,
@@ -829,7 +832,7 @@ def draw_lesion_masks(
             options=options,
         )
         attributes = cast(dict[str, object], cast(list[object], report[str(organ_id)])[2])
-        mx = cast("Mlx", import_mlx())
+        mx = cast("MlxRuntime", import_mlx())
         organ_source = ras_to_source(geometry.organ_mask).astype(bool)
         anatomy = (
             ras_to_source(geometry.anatomy_mask)
@@ -982,7 +985,9 @@ def _optional_input_path(
 
 
 @contextmanager
-def _generation_cache_limit(mx: Mlx, options: LesionDiffusionOptions) -> Generator[int | None]:
+def _generation_cache_limit(
+    mx: MlxRuntime, options: LesionDiffusionOptions
+) -> Generator[int | None]:
     """Cap free MLX buffers for memory-saving modes and restore the caller's limit."""
     if options.vq_mode == "slab":
         cap = _SLAB_CACHE_LIMIT_BYTES
@@ -1019,7 +1024,7 @@ def _execute_run(
         options=options,
     )
     attributes = cast(dict[str, object], cast(list[object], report[str(model_label)])[2])
-    mx = cast("Mlx", import_mlx())
+    mx = cast("MlxRuntime", import_mlx())
     stages: dict[str, dict[str, object]] = {}
     with _generation_cache_limit(mx, options) as cache_limit:
         image, reconstruction, mask, facts = run_native_pipeline(
@@ -1156,7 +1161,7 @@ def run_native_pipeline(
     options: LesionDiffusionOptions,
     attributes: Mapping[str, object],
     weights_dir: Path,
-    mx: Mlx,
+    mx: MlxRuntime,
     on_stage_completed: Callable[[str, dict[str, object]], None],
     anatomy_mask_ras: HostArray | None = None,
     lesion_mask_ras: BoolArray | None = None,
@@ -1346,7 +1351,7 @@ def _lmnet_sampler(
     lm_attributes: Mapping[str, object],
     directory: Path,
     tokenizer_path: Path,
-    mx: Mlx,
+    mx: MlxRuntime,
     *,
     anatomy: HostArray,
 ) -> tuple[Callable[[], tuple[BoolArray, int]], int]:
@@ -1376,7 +1381,7 @@ def _lmnet_sampler(
     del text
     # Conditioning channels: anatomy label id / 104 (the upstream label count),
     # target organ, box; shape (1, 3, *LMNET_CROP).
-    conditioning = cast(ArrayConstructor, mx.array)(
+    conditioning = mx.array(
         np.stack((anatomy[crop].astype(np.float64) / 104.0, organ[crop], bbox[crop]))[None],
         dtype=mx.float32,
     )
@@ -1426,7 +1431,7 @@ def _run_lmnet(
     lm_attributes: Mapping[str, object],
     directory: Path,
     tokenizer_path: Path,
-    mx: Mlx,
+    mx: MlxRuntime,
     *,
     anatomy: HostArray,
 ) -> tuple[BoolArray, dict[str, object]]:
@@ -1479,8 +1484,9 @@ def _run_linet(
     lin_attributes: Mapping[str, object],
     directory: Path,
     tokenizer_path: Path,
-    mx: Mlx,
-    *, prepared: _Preparation | None = None,
+    mx: MlxRuntime,
+    *,
+    prepared: _Preparation | None = None,
 ) -> tuple[HostArray, HostArray | None, dict[str, object]]:
     """Generate the lesion image using the selected mask and attributes.
 
@@ -1495,7 +1501,7 @@ def _run_linet(
     encoder_reused = prepared is not None and prepared.state.latent is not None
     if prepared is not None and prepared.state.latent is not None:
         # A new MLX array descriptor keeps slice assignment local to this draw.
-        latent = cast(ArrayConstructor, mx.array)(prepared.state.latent)
+        latent = mx.array(prepared.state.latent)
         load_elapsed = encode_elapsed = 0.0
         nax_convolutions = 0
     else:
@@ -1506,21 +1512,19 @@ def _run_linet(
         mx.eval(*vq.weights.values())
         load_elapsed = time.perf_counter() - lin_started
         encode_started = time.perf_counter()
-        native_image = piecewise_ct(cast(ArrayConstructor, mx.array)(image[None, None]), mx).astype(
-            mx.float16
-        )
+        native_image = piecewise_ct(mx.array(image[None, None]), mx).astype(mx.float16)
         latent = encode_source(vq, native_image, mx)
         if not bool(mx.all(mx.isfinite(latent)).item()):
             raise ModelExecutionError("Native VQ encoder produced non-finite latents")
         mx.eval(latent)
         if prepared is not None:
-            prepared.state.latent = cast(ArrayConstructor, mx.array)(latent)
+            prepared.state.latent = mx.array(latent)
         encode_elapsed = time.perf_counter() - encode_started
         nax_convolutions = len(vq.nax_weights)
         del vq, native_image
     # Nearest-neighbour resize uses the same source index mapping as the VQ helper.
     mask = resize_nearest(
-        cast(ArrayConstructor, mx.array)(lesion[None, None], dtype=mx.float16),
+        mx.array(lesion[None, None], dtype=mx.float16),
         tuple(int(value) for value in latent.shape[2:]),
         mx=mx,
     )
@@ -1652,7 +1656,7 @@ def _run_linet(
     return generated_ras, reconstruction_ras, lin_stage
 
 
-def _decode_ct(decoder: VqAutoencoder, latent: Array, dtype: Dtype, mx: Mlx) -> FloatArray:
+def _decode_ct(decoder: VqAutoencoder, latent: Array, dtype: Dtype, mx: MlxRuntime) -> FloatArray:
     """Decode a source-layout latent to a RAS CT in HU (float32, clipped to +-1000).
 
     Raises:
@@ -1800,7 +1804,11 @@ def require_weights(path: _PathArg, *, inference_mode: str = DEFAULT_INFERENCE_M
 
 
 def load_stage(
-    directory: Path, name: str, mx: Mlx, *, dtype: Dtype,
+    directory: Path,
+    name: str,
+    mx: MlxRuntime,
+    *,
+    dtype: Dtype,
     prefixes: tuple[str, ...] | None = None,
 ) -> dict[str, Array]:
     """Load one stage from the native safetensors bundle and cast its arrays.
@@ -2347,6 +2355,15 @@ _LABEL_RANGE_ERRORS: Final = {
 }
 
 
+def _millimeter_image(volume: Volume[StoredScalar]) -> NiftiImage:
+    """Rebuild a NiBabel image from ``volume`` with its geometry and header unit in millimeters."""
+    header = nib.Nifti1Header.from_header(volume.header)
+    header.set_xyzt_units("mm", "unknown")
+    header.set_sform(volume.sform, volume.sform_code)
+    header.set_qform(volume.qform, volume.qform_code)
+    return nib.Nifti1Image(volume.data, volume.affine, header)
+
+
 def _load_label_map(
     reference: NiftiImage,
     supplied_mask: Path,
@@ -2362,13 +2379,8 @@ def _load_label_map(
     ``0..max_label``, or its grid differs from ``reference`` after standardization.
     Validate source labels before resampling, which can otherwise hide invalid voxels.
     """
-    if not supplied_mask.is_file():
-        raise InvalidInputError(f"Missing {role} NIfTI: {supplied_mask}")
-    try:
-        image = nib.load(str(supplied_mask))
-    except (OSError, ValueError, ImageFileError) as exc:
-        raise InvalidInputError(f"Could not read {role} NIfTI: {supplied_mask}") from exc
-    data = cast(NumericArray, np.asanyarray(image.dataobj))
+    volume = read_volume(supplied_mask, role=f"{role} NIfTI", dtype=None)
+    data = cast(NumericArray, volume.data)
     if not np.all(np.isfinite(data)):
         raise InvalidInputError(f"LesionDiffusion {role} contains non-finite values")
     values = np.unique(data)
@@ -2376,7 +2388,9 @@ def _load_label_map(
         raise InvalidInputError(f"{role.capitalize()} labels must be non-negative integers")
     if np.any(values > max_label):
         raise InvalidInputError(_LABEL_RANGE_ERRORS[role])
-    image, data = _standardize_to_ras_1mm(image, data, order=0, resampling=resampling)
+    image, data = _standardize_to_ras_1mm(
+        _millimeter_image(volume), data, order=0, resampling=resampling
+    )
     image, data = _pad_to_even(image, data, mode="constant")
     if image.shape != reference.shape or not np.allclose(
         image.affine, reference.affine, atol=1e-4, rtol=0
@@ -2659,10 +2673,11 @@ def materialize_arrays(
     directory.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(prefix=".lesiondiffusion-", dir=directory) as staging:
         staged = {role: Path(staging) / outputs[role].name for _, role, _ in writes}
+        reference = _reference_volume(geometry.output_reference, outputs["image"])
         for data, role, dtype in writes:
             _save_like_reference(
                 data=data,
-                reference=geometry.output_reference,
+                reference=reference,
                 destination=staged[role],
                 dtype=dtype,
             )
@@ -2714,26 +2729,37 @@ def _publish_outputs(staged: Mapping[str, Path], outputs: Mapping[str, Path]) ->
 def _save_like_reference(
     *,
     data: HostArray,
-    reference: NiftiImage,
+    reference: Volume[StoredScalar],
     destination: Path,
     dtype: type[np.generic],
 ) -> None:
     """Write ``data`` cropped to ``reference``'s grid, keeping its affine, qform and sform."""
     destination.parent.mkdir(parents=True, exist_ok=True)
-    header = nib.Nifti1Header.from_header(reference.header)
-    header.set_data_dtype(dtype)
-    cropped = np.asarray(data, dtype=dtype)[_input_grid(reference)]
-    output = nib.Nifti1Image(cropped, reference.affine, header)
-    qform, qcode = reference.get_qform(coded=True)
-    sform, scode = reference.get_sform(coded=True)
-    output.set_qform(reference.affine if qform is None else qform, int(qcode))
-    output.set_sform(reference.affine if sform is None else sform, int(scode))
-    nib.save(output, str(destination))
+    cropped = np.asarray(data, dtype=dtype)[tuple(slice(0, size) for size in reference.data.shape)]
+    write_like(destination, cropped, reference, dtype=dtype)
 
 
 def _input_grid(reference: NiftiImage) -> tuple[slice, ...]:
     """Drop the trailing ``_pad_to_even`` voxels; the origin is unchanged."""
     return tuple(slice(0, int(size)) for size in reference.shape[:3])
+
+
+def _reference_volume(image: NiftiImage, path: Path) -> Volume[StoredScalar]:
+    """Describe the standardized input grid as a ``Volume`` for ``write_like``."""
+    qform, qcode = image.get_qform(coded=True)
+    sform, scode = image.get_sform(coded=True)
+    zooms = image.header.get_zooms()
+    return Volume(
+        data=cast(NDArray[StoredScalar], np.asanyarray(image.dataobj)),
+        affine=image.affine,
+        path=path,
+        zooms=(float(zooms[0]), float(zooms[1]), float(zooms[2])),
+        sform=image.affine if sform is None else sform,
+        sform_code=int(scode),
+        qform=image.affine if qform is None else qform,
+        qform_code=int(qcode),
+        header=cast(NiftiHeader, image.header),
+    )
 
 
 def output_paths(output: Path, output_region: str = DEFAULT_OUTPUT_REGION) -> dict[str, Path]:

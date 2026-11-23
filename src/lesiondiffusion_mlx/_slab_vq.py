@@ -18,15 +18,16 @@ from medmlx_core.ops import group_norm_ncdhw
 
 from lesiondiffusion_mlx._nax_conv import nax_conv3d
 from lesiondiffusion_mlx._source_half import group_norm_half
-from lesiondiffusion_mlx._typing import ArrayConstructor
 from lesiondiffusion_mlx.mlx_model import VqAutoencoder, vq_decode_layers, vq_encode_layers
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from types import TracebackType
 
+    from medmlx_core.typing import MetalKernel, MlxRuntime
+
     from lesiondiffusion_mlx._arrays import HostArray
-    from lesiondiffusion_mlx._typing import Array, Dtype, MetalKernel, Mlx
+    from lesiondiffusion_mlx._typing import Array, Dtype
 
 _SLAB_VOXELS = 1 << 20
 # One trained GroupNorm group holds six channels. Keep its FP32 read below
@@ -118,7 +119,7 @@ if constexpr (SPATIAL % 4 == 0) {
 
 
 @lru_cache(maxsize=1)
-def _apply_kernel(mx: Mlx) -> MetalKernel:
+def _apply_kernel(mx: MlxRuntime) -> MetalKernel:
     return mx.fast.metal_kernel(
         name="lesion_vq_slab_group_silu",
         input_names=["x", "affine"],
@@ -210,7 +211,7 @@ class _SlabLayers:
 
     def load(self, x: _Volume) -> Array:
         """Collect a small-channel VQ input or output on the native device."""
-        return cast(ArrayConstructor, self.mx.array)(x.read(0, x.depth))
+        return self.mx.array(x.read(0, x.depth))
 
     @staticmethod
     def _spans(depth: int, height: int, width: int, *, scale: int = 1) -> Iterator[tuple[int, int]]:
@@ -223,7 +224,7 @@ class _SlabLayers:
         affine: Array | None = None, residual: _Volume | None = None,
     ) -> _Volume:
         """Convolve each slab with neighboring planes, cropping only the halo outputs."""
-        array = cast(ArrayConstructor, self.mx.array)
+        array = self.mx.array
         channels = self.model.weights[key + ".weight"].shape[0]
         out = self._empty(channels, x.depth, x.height, x.width)
         for start, stop in self._spans(x.depth, x.height, x.width):
@@ -242,7 +243,7 @@ class _SlabLayers:
         out = self._empty(self.model.weights[key + ".weight"].shape[0], depth, height, width)
         for start, stop in self._spans(depth, x.height, x.width, scale=2):
             end = min(x.depth, 2 * stop + 1)
-            tile = cast(ArrayConstructor, mx.array)(x.read(2 * start, end))
+            tile = mx.array(x.read(2 * start, end))
             tile = mx.pad(tile, [(0, 0), (0, 0), (0, 2 * stop + 1 - end), (0, 1), (0, 1)])
             out.write(self.model.conv(tile, key, padding=0, stride=2), start)
             del tile
@@ -254,7 +255,7 @@ class _SlabLayers:
         out = self._empty(self.model.weights[key + ".weight"].shape[0], depth, height, width)
         for start, stop in self._spans(x.depth, height, width, scale=2):
             lo, hi = max(0, start - 1), min(x.depth, stop + 1)
-            tile = cast(ArrayConstructor, self.mx.array)(x.read(lo, hi))
+            tile = self.mx.array(x.read(lo, hi))
             y = self.model.upsample_conv(tile, key)
             out.write(y[:, :, 2 * (start - lo) : 2 * (stop - lo)], 2 * start)
             del tile, y
@@ -273,7 +274,7 @@ class _SlabLayers:
         normalized = None if native else self._empty(x.channels, x.depth, x.height, x.width)
         affines: list[Array] = []
         for start in range(0, x.channels, width):
-            tile = cast(ArrayConstructor, mx.array)(x.read(0, x.depth, start, width))
+            tile = mx.array(x.read(0, x.depth, start, width))
             w, b = weight[start : start + width], bias[start : start + width]
             if normalized is None:
                 affine = group_norm_affine(tile, w, b, groups=1, eps=eps, mx=mx)

@@ -9,13 +9,14 @@ the projection layout, avoiding padded heads and head-layout copies.
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from lesiondiffusion_mlx._nax_conv import NAX_MMA_HEADER
-from lesiondiffusion_mlx._typing import ArrayConstructor
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Array, MetalKernel, Mlx
+    from medmlx_core.typing import MetalKernel, MlxRuntime
+
+    from lesiondiffusion_mlx._typing import Array
 
 _SIMDGROUPS = 4
 _ROWS = 16
@@ -115,7 +116,7 @@ for (short i = 0; i < 2; i++) {
 
 
 @lru_cache(maxsize=1)
-def _kernel(mx: Mlx) -> MetalKernel:
+def _kernel(mx: MlxRuntime) -> MetalKernel:
     """Compile the direct-half NAX kernel once per runtime."""
     return mx.fast.metal_kernel(
         name="lesion_flash_attention_nax_half_d32",
@@ -127,7 +128,7 @@ def _kernel(mx: Mlx) -> MetalKernel:
 
 
 def flash_attention_half(
-    q: Array, k: Array, v: Array, *, heads: int, scale: float, mx: Mlx
+    q: Array, k: Array, v: Array, *, heads: int, scale: float, mx: MlxRuntime
 ) -> Array:
     """Attend eligible FP16 projections and return their shape, layout and dtype.
 
@@ -138,7 +139,7 @@ def flash_attention_half(
     batch, length = int(q.shape[0]), int(q.shape[1])
     groups = -(-length // (_ROWS * _SIMDGROUPS))
     return _kernel(mx)(
-        inputs=[q, k, v, cast(ArrayConstructor, mx.array)([scale], dtype=mx.float32)],
+        inputs=[q, k, v, mx.array([scale], dtype=mx.float32)],
         template=[("L", length), ("LK", int(k.shape[1])), ("H", heads), ("NSG", _SIMDGROUPS)],
         grid=(32 * _SIMDGROUPS * groups, batch * heads, 1),
         threadgroup=(32 * _SIMDGROUPS, 1, 1),

@@ -12,10 +12,12 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from itertools import pairwise
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Array, Mlx
+    from medmlx_core.typing import MlxRuntime
+
+    from lesiondiffusion_mlx._typing import Array
 
 from medmlx_core.group_norm import (
     group_norm_affine,
@@ -39,7 +41,6 @@ from lesiondiffusion_mlx._nax_conv import (
 )
 from lesiondiffusion_mlx._source_half import conv3d_half, group_norm_half
 from lesiondiffusion_mlx._spatial import resize_nearest
-from lesiondiffusion_mlx._typing import ArrayConstructor
 
 
 @dataclass(frozen=True)
@@ -104,7 +105,7 @@ class SourceLayers:
     def __init__(
         self,
         weights: Mapping[str, Array],
-        mx: Mlx,
+        mx: MlxRuntime,
         *,
         source_arithmetic: bool = True,
         native_kernels: bool | None = None,
@@ -392,7 +393,7 @@ class LdmUnet(SourceLayers):
     def __init__(
         self,
         weights: Mapping[str, Array],
-        mx: Mlx,
+        mx: MlxRuntime,
         config: UnetConfig,
         *,
         source_arithmetic: bool = True,
@@ -714,8 +715,12 @@ class VqAutoencoder(SourceLayers):
     _codebook_norm_cache: tuple[Array, Array] | None = None
 
     def __init__(
-        self, weights: Mapping[str, Array], mx: Mlx, *,
-        source_arithmetic: bool = True, native_kernels: bool | None = None,
+        self,
+        weights: Mapping[str, Array],
+        mx: MlxRuntime,
+        *,
+        source_arithmetic: bool = True,
+        native_kernels: bool | None = None,
     ):
         """Keep only the supplied stage bundle and pack convolutions when called."""
         super().__init__(
@@ -870,8 +875,8 @@ class BiomedTextEncoder(SourceLayers):
         x = self.layer_norm(x, prefix + ".LayerNorm", eps=1e-12)
         mask = mx.where(
             token_ids[:, None, None, :] != 0,
-            cast(ArrayConstructor, mx.array)(0, dtype=x.dtype),
-            cast(ArrayConstructor, mx.array)(-float("inf"), dtype=x.dtype),
+            mx.array(0, dtype=x.dtype),
+            mx.array(-float("inf"), dtype=x.dtype),
         )
         for index in range(12):
             key = f"transformer.encoder.layer.{index}"

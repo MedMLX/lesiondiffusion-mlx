@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Mlx
+    from medmlx_core.typing import MlxRuntime
 import subprocess
 import sys
 
@@ -13,7 +13,7 @@ import pytest
 
 
 @pytest.fixture(scope="session")
-def mx() -> Mlx:
+def mx() -> MlxRuntime:
     """Provide the native runtime when the Metal subprocess probe succeeds."""
     completed = subprocess.run(
         [
@@ -30,4 +30,4 @@ def mx() -> Mlx:
         pytest.fail("Native runtime probe failed unexpectedly:\n" + completed.stderr)
     from medmlx_core.runtime import import_mlx
 
-    return cast("Mlx", import_mlx())
+    return cast("MlxRuntime", import_mlx())

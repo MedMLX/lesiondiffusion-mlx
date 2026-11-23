@@ -29,7 +29,7 @@ from lesiondiffusion_mlx.mlx_model import LMNET_CONFIG, LdmUnet
 from lesiondiffusion_mlx.mlx_sampling import DdimSampler
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Mlx
+    from medmlx_core.typing import MlxRuntime
 
 
 class Arguments(argparse.Namespace):
@@ -61,7 +61,7 @@ def main() -> None:
 
     import mlx.core as mx
 
-    runtime = cast("Mlx", mx)
+    runtime = cast("MlxRuntime", mx)
     fixture = runtime.load(str(args.fixture), format="safetensors")
     expected = runtime.load(str(args.reference), format="safetensors")["sample"]
     dtype = {"float32": mx.float32, "float16": mx.float16, "bfloat16": mx.bfloat16}[args.dtype]

@@ -19,7 +19,9 @@ from lesiondiffusion_mlx._nax_conv import nax_available, nax_conv3d
 from lesiondiffusion_mlx.mlx_model import VqAutoencoder
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Array, Mlx
+    from medmlx_core.typing import MlxRuntime
+
+    from lesiondiffusion_mlx._typing import Array
 
 _SCALE = 0.25
 
@@ -32,7 +34,7 @@ class ScaledVqDecoder(VqAutoencoder):
     FP32 quantization, retaining reference nearest-neighbor selection.
     """
 
-    def __init__(self, weights: Mapping[str, Array], codebook: Array, mx: Mlx):
+    def __init__(self, weights: Mapping[str, Array], codebook: Array, mx: MlxRuntime):
         """Require enabled NAX and retain the FP32 codebook with half network weights."""
         if not nax_available(mx):
             raise ValueError("Scaled FP16 VQ decoding requires enabled NAX")

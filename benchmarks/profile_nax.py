@@ -22,8 +22,7 @@ import numpy as np
 
 if TYPE_CHECKING:
     import mlx.core as mx
-
-    from lesiondiffusion_mlx._typing import Mlx
+    from medmlx_core.typing import MlxRuntime
 
 
 def main() -> None:
@@ -44,7 +43,7 @@ def main() -> None:
     from lesiondiffusion_mlx.medmlx import load_stage
     from lesiondiffusion_mlx.mlx_model import LINET_CONFIG, LMNET_CONFIG, LdmUnet
 
-    runtime = cast("Mlx", import_mlx())
+    runtime = cast("MlxRuntime", import_mlx())
     import mlx.core as mx
 
     inputs = runtime.load(str(args.inputs), format="safetensors")

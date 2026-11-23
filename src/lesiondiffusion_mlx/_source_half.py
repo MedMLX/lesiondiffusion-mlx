@@ -7,14 +7,14 @@ and moments_utils.h. See root THIRD_PARTY_NOTICES.md. Inputs and outputs remain 
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Array, MetalKernel, Mlx
+    from medmlx_core.typing import MetalKernel, MlxRuntime
+
+    from lesiondiffusion_mlx._typing import Array
 
 from medmlx_core.layout import require_ncdhw
-
-from lesiondiffusion_mlx._typing import ArrayConstructor
 
 _CONV = r"""
 uint tid = thread_position_in_threadgroup.x;
@@ -320,7 +320,7 @@ float4 result = scale * float4(value) + offset;
 
 
 @lru_cache(maxsize=1)
-def _norm_affine_kernels(mx: Mlx) -> tuple[MetalKernel, MetalKernel]:
+def _norm_affine_kernels(mx: MlxRuntime) -> tuple[MetalKernel, MetalKernel]:
     """Fuse group moments with channel affines; apply without contracting multiply/add."""
     return (
         mx.fast.metal_kernel(
@@ -341,7 +341,9 @@ def _norm_affine_kernels(mx: Mlx) -> tuple[MetalKernel, MetalKernel]:
 
 
 @lru_cache(maxsize=1)
-def _kernels(mx: Mlx) -> tuple[MetalKernel, MetalKernel, MetalKernel, MetalKernel, MetalKernel]:
+def _kernels(
+    mx: MlxRuntime,
+) -> tuple[MetalKernel, MetalKernel, MetalKernel, MetalKernel, MetalKernel]:
     """Build or reuse the source-order half-precision Metal kernels."""
 
     def kernel(
@@ -379,7 +381,7 @@ def _kernels(mx: Mlx) -> tuple[MetalKernel, MetalKernel, MetalKernel, MetalKerne
 
 
 def conv3d_half(
-    x: Array, weight: Array, bias: Array | None, *, padding: int, stride: int, mx: Mlx
+    x: Array, weight: Array, bias: Array | None, *, padding: int, stride: int, mx: MlxRuntime
 ) -> Array:
     """Accumulate four channel-major partial sums, add bias, then round once.
 
@@ -440,7 +442,7 @@ def conv3d_half(
 
 
 def group_norm_half(
-    x: Array, weight: Array, bias: Array, *, groups: int, eps: float, mx: Mlx
+    x: Array, weight: Array, bias: Array, *, groups: int, eps: float, mx: MlxRuntime
 ) -> Array:
     """Cascade source-ordered Welford moments and apply the FP32 affine.
 
@@ -505,7 +507,7 @@ def group_norm_half(
         if blocks
         else mx.zeros((1,), dtype=mx.float32)
     )
-    epsilon = cast(ArrayConstructor, mx.array)([eps], dtype=mx.float32)
+    epsilon = mx.array([eps], dtype=mx.float32)
     if x.dtype == mx.float16 and positions >= 4096 and positions % 4 == 0:
         # Large aligned volumes use a vector copy with channel affines prepared
         # by the moments kernel. Small/tail shapes retain the scalar path.

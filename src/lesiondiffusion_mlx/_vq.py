@@ -6,7 +6,9 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Array, MetalKernel, Mlx
+    from medmlx_core.typing import MetalKernel, MlxRuntime
+
+    from lesiondiffusion_mlx._typing import Array
 
 
 _SEARCH = r"""
@@ -50,7 +52,7 @@ if (lane == 0) indices[position] = best_index;
 
 
 @lru_cache(maxsize=1)
-def _search_kernel(mx: Mlx) -> MetalKernel:
+def _search_kernel(mx: MlxRuntime) -> MetalKernel:
     """Compile once; explicit fma handles the dot while other operations stay separate."""
     return mx.fast.metal_kernel(
         name="lesion_vq_nearest4",
@@ -61,7 +63,7 @@ def _search_kernel(mx: Mlx) -> MetalKernel:
     )
 
 
-def nearest_codebook4(z: Array, codebook: Array, codebook_norm: Array, mx: Mlx) -> Array:
+def nearest_codebook4(z: Array, codebook: Array, codebook_norm: Array, mx: MlxRuntime) -> Array:
     """Return nearest indices for ``(positions, 4)`` vectors and a nonempty codebook.
 
     Inputs share FP16 or FP32 dtype. Norms retain the array implementation's

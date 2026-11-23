@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Mlx
+    from medmlx_core.typing import MlxRuntime
 
 
 def source_patch(root: Path) -> str:
@@ -69,7 +69,7 @@ def runtime_diagnostics(
 
     from lesiondiffusion_mlx._nax_conv import DISABLE_ENV, nax_available
 
-    available = nax_available(cast("Mlx", mx))
+    available = nax_available(cast("MlxRuntime", mx))
     conditioned = inference_mode == "conditioned"
     native_half = conditioned and available and execution == "candidate"
     return {

@@ -17,7 +17,9 @@ from lesiondiffusion_mlx.mlx_model import LdmUnet, VqAutoencoder
 from lesiondiffusion_mlx.mlx_sampling import DdimSampler
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Array, Mlx
+    from medmlx_core.typing import MlxRuntime
+
+    from lesiondiffusion_mlx._typing import Array
 
 
 class _BaselineDenoiser:
@@ -59,7 +61,7 @@ def baseline_execution() -> Generator[None]:
     original_vq = medmlx.VqAutoencoder
     original_flash_eligible = mlx_model.flash_eligible
 
-    def flash_eligible(q: Array, k: Array, heads: int, mx: Mlx) -> bool:
+    def flash_eligible(q: Array, k: Array, heads: int, mx: MlxRuntime) -> bool:
         # Before the FP16 specialization, half-precision heads used padded MLX SDPA.
         return q.dtype == mx.float32 and original_flash_eligible(q, k, heads, mx)
 

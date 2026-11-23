@@ -15,8 +15,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
+    from medmlx_core.typing import MlxRuntime
+
     from lesiondiffusion_mlx._arrays import BoolArray, HostArray, NumericArray
-    from lesiondiffusion_mlx._typing import Array, Mlx
+    from lesiondiffusion_mlx._typing import Array
 
 
 class _ArrayWriter(Protocol):
@@ -212,7 +214,7 @@ def component_case() -> dict[str, object]:
         raise ValueError(f"Unknown benchmark component: {component}")
     weights_dir = Path(os.environ["LESION_BENCH_WEIGHTS"])
     fixture = Path(os.environ["LESION_BENCH_FIXTURE"])
-    runtime = cast("Mlx", mx)
+    runtime = cast("MlxRuntime", mx)
     arrays = runtime.load(str(fixture), format="safetensors")
     dtype_name = os.environ.get(
         "LESION_BENCH_DTYPE", "float16" if component in {"linet", "vq-encode"} else "float32"

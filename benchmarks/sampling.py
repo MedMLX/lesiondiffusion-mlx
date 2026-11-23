@@ -17,7 +17,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Array, Mlx
+    from medmlx_core.typing import MlxRuntime
+
+    from lesiondiffusion_mlx._typing import Array
 
 
 def sample_case() -> dict[str, object]:
@@ -28,7 +30,7 @@ def sample_case() -> dict[str, object]:
     from lesiondiffusion_mlx.mlx_model import LINET_CONFIG, LMNET_CONFIG, LdmUnet
     from lesiondiffusion_mlx.mlx_sampling import DdimSampler
 
-    mx = cast("Mlx", import_mlx())
+    mx = cast("MlxRuntime", import_mlx())
     stage = os.environ["LESION_BENCH_COMPONENT"]
     iterations = int(os.environ.get("LESION_BENCH_ITERATIONS", "20"))
     if stage not in {"lmnet", "linet"}:

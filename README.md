@@ -117,6 +117,22 @@ The CT, masks, weights, organ, inference mode, decoder mode, VQ mode and output
 region stay fixed after the first draw; each draw builds fresh text conditioning
 and sampler state.
 
+To choose among lesion shapes before inpainting, `draw_lesion_masks` samples one
+mask per seed in a fixed box and writes nothing. It takes the arguments of `run`
+that LMNet uses, plus required `bbox_center_voxel` and `seeds`, and returns one
+boolean array per seed on the standardized grid. Each equals the `mask` output of
+`run` with that seed; pass a chosen mask to `run` as `lesion_mask_path`.
+
+```python
+from lesiondiffusion_mlx import draw_lesion_masks
+
+masks = draw_lesion_masks(
+    image_path="ct.nii.gz", organ_mask_path="liver.nii.gz", organ="liver",
+    lesion_type="tumor", bbox_size_mm=[30, 30, 20],
+    bbox_center_voxel=[80, 80, 64], seeds=[1, 2, 3],
+)
+```
+
 - **Stage steps:** `lmnet_diffusion_steps=200, linet_diffusion_steps=50` keeps
   200-step mask generation and uses 50-step CT inpainting. For the same seed the
   mask is unchanged and the CT differs. Results record the requested and actual
@@ -148,6 +164,9 @@ condition the generator but do not guarantee a particular HU contrast or appeara
   with `lesion_mask_path` only the inpainting crop applies.
 - A supplied lesion mask must be a single connected component that overlaps the organ
   mask, so split multifocal segmentations first.
+- Mask files must be 3D real-valued NIfTI-1 or NIfTI-2 files. Spatial units of meter
+  or micron are converted to millimeters; any other unit code, a 2D, complex or
+  boolean mask, or another file format raises `InvalidInputError`.
 - The box guides generation, but generated lesions can extend past the box or organ.
 
 **Outputs.** `synthetic_ct.nii.gz` (float32 HU), `lesion_mask.nii.gz` and

@@ -6,7 +6,9 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Array, MetalKernel, Mlx
+    from medmlx_core.typing import MetalKernel, MlxRuntime
+
+    from lesiondiffusion_mlx._typing import Array
 
 
 _UPSAMPLE = r"""
@@ -27,7 +29,7 @@ output[dst] = values[loc];
 
 
 @lru_cache(maxsize=1)
-def _upsample_kernel(mx: Mlx) -> MetalKernel:
+def _upsample_kernel(mx: MlxRuntime) -> MetalKernel:
     """Reuse the kernel object so repeated denoising does not create Metal libraries."""
     return mx.fast.metal_kernel(
         name="lesion_nearest_upsample2",
@@ -38,7 +40,7 @@ def _upsample_kernel(mx: Mlx) -> MetalKernel:
     )
 
 
-def upsample_nearest2(x: Array, *, mx: Mlx) -> Array:
+def upsample_nearest2(x: Array, *, mx: MlxRuntime) -> Array:
     """Duplicate NCDHW voxels twice along each spatial axis in one copy pass.
 
     The caller supplies a nonempty five-dimensional input. Integer division
@@ -57,7 +59,7 @@ def upsample_nearest2(x: Array, *, mx: Mlx) -> Array:
     )[0]
 
 
-def resize_nearest(x: Array, shape: tuple[int, ...], *, mx: Mlx) -> Array:
+def resize_nearest(x: Array, shape: tuple[int, ...], *, mx: MlxRuntime) -> Array:
     """Resize NCDHW spatial axes with the source's floor(i * in_size / out_size) rule."""
     if len(shape) != 3:
         raise ValueError("LesionDiffusion nearest resizing needs three spatial axes")

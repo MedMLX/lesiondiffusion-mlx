@@ -20,8 +20,9 @@ import numpy as np
 
 if TYPE_CHECKING:
     import numpy.typing as npt
+    from medmlx_core.typing import MlxRuntime
 
-    from lesiondiffusion_mlx._typing import Array, Mlx
+    from lesiondiffusion_mlx._typing import Array
     from lesiondiffusion_mlx.mlx_model import VqAutoencoder
 
 
@@ -31,7 +32,7 @@ def quantize_case() -> dict[str, object]:
 
     from lesiondiffusion_mlx.mlx_model import VqAutoencoder
 
-    mx = cast("Mlx", import_mlx())
+    mx = cast("MlxRuntime", import_mlx())
     variant = os.environ.get("LESION_BENCH_VARIANT", "fused")
     dtype_name = os.environ.get("LESION_BENCH_DTYPE", "float32")
     if variant not in {"baseline", "fused"} or dtype_name not in {"float32", "float16"}:
@@ -78,11 +79,10 @@ def parity_quantize(
     """Compare retained chunked lookup and native lookup with identical arithmetic."""
     from medmlx_core.runtime import import_mlx
 
-    from lesiondiffusion_mlx._typing import ArrayConstructor
     from lesiondiffusion_mlx.mlx_model import VqAutoencoder
 
-    mx = cast("Mlx", import_mlx())
-    array = cast(ArrayConstructor, mx.array)
+    mx = cast("MlxRuntime", import_mlx())
+    array = mx.array
     model = VqAutoencoder(
         {"quantize.embedding.weight": array(codebook)},
         mx,
@@ -99,7 +99,7 @@ def decode_pair_case() -> dict[str, object]:
     from lesiondiffusion_mlx.medmlx import load_stage
     from lesiondiffusion_mlx.mlx_model import VqAutoencoder
 
-    mx = cast("Mlx", import_mlx())
+    mx = cast("MlxRuntime", import_mlx())
     variant = os.environ.get("LESION_BENCH_VARIANT", "sequential")
     if variant not in {"sequential", "sequential-clear", "batched"}:
         raise ValueError("Choose sequential/sequential-clear/batched for paired decoding")

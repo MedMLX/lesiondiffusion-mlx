@@ -20,7 +20,6 @@ from lesiondiffusion_mlx import medmlx
 from lesiondiffusion_mlx._arrays import BoolArray, FloatArray, HostArray, NumericArray
 from lesiondiffusion_mlx._nax_conv import nax_available
 from lesiondiffusion_mlx._nifti import nib
-from lesiondiffusion_mlx._typing import ArrayConstructor
 from lesiondiffusion_mlx.medmlx import run
 from lesiondiffusion_mlx.mlx_model import UnetConfig, VqAutoencoder
 from lesiondiffusion_mlx.mlx_sampling import DdimSampler
@@ -29,7 +28,9 @@ from tests._fixture_models import text_weights, unet_weights, vq_weights
 from tests.test_equivalence import reference
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Array, Mlx
+    from medmlx_core.typing import MlxRuntime
+
+    from lesiondiffusion_mlx._typing import Array
 
 
 load_safe = cast("Callable[[str], dict[str, HostArray]]", vars(safe_numpy)["load_file"])
@@ -364,11 +365,11 @@ def test_missing_or_mismatched_weights_raise_asset_not_ready(
 
 
 @pytest.fixture
-def upstream_inpainting(mx: Mlx, monkeypatch: pytest.MonkeyPatch) -> None:
+def upstream_inpainting(mx: MlxRuntime, monkeypatch: pytest.MonkeyPatch) -> None:
     """Fix discontinuous learned stages while exercising the runner's wiring."""
     fixture = reference("generation")
 
-    def recorded_encode(model: VqAutoencoder, array: Array, mx: Mlx) -> Array:
+    def recorded_encode(model: VqAutoencoder, array: Array, mx: MlxRuntime) -> Array:
         """Compare the fixture image passed into upstream encoding."""
         # Normalization is rounded to half at the upstream VQ input boundary.
         # A float32 affine rounding difference may straddle a half midpoint.
@@ -378,13 +379,13 @@ def upstream_inpainting(mx: Mlx, monkeypatch: pytest.MonkeyPatch) -> None:
             atol=2**-11,
             rtol=0,
         )
-        return cast(ArrayConstructor, mx.array)(fixture["encoded"])
+        return mx.array(fixture["encoded"])
 
     class RecordedQuantizer(VqAutoencoder):
         def quantize(self, z: Array, *, chunk_size: int = 4096) -> Array:
             """Compare the fixture latent passed to source quantization."""
             np.testing.assert_array_equal(cast(NumericArray, np.array(z)), fixture["final_latent"])
-            return cast(ArrayConstructor, mx.array)(fixture["quantized"])
+            return mx.array(fixture["quantized"])
 
     class FixedNoiseSampler(DdimSampler):
         attempts: ClassVar[int] = 0
@@ -408,7 +409,7 @@ def upstream_inpainting(mx: Mlx, monkeypatch: pytest.MonkeyPatch) -> None:
                 np.testing.assert_array_equal(
                     cast(NumericArray, np.array(mask)), fixture["latent_mask"]
                 )
-                return cast(ArrayConstructor, mx.array)(fixture["sampled_crop"])
+                return mx.array(fixture["sampled_crop"])
             index = FixedNoiseSampler.attempts
             FixedNoiseSampler.attempts += 1
             initial, noise = fixture[f"lm_initial.{index}"], fixture[f"lm_noise.{index}"]
@@ -416,8 +417,8 @@ def upstream_inpainting(mx: Mlx, monkeypatch: pytest.MonkeyPatch) -> None:
                 denoiser,
                 condition,
                 conditioning_image,
-                initial_noise=cast(ArrayConstructor, mx.array)(initial),
-                step_noise=tuple(cast(ArrayConstructor, mx.array)(item) for item in noise),
+                initial_noise=mx.array(initial),
+                step_noise=tuple(mx.array(item) for item in noise),
                 mask=mask,
             )
 
@@ -431,7 +432,7 @@ def test_run_matches_upstream_end_to_end(
     tiny_weights: Path,
     tiny_networks: None,
     tmp_path: Path,
-    mx: Mlx,
+    mx: MlxRuntime,
     upstream_inpainting: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -526,7 +527,11 @@ def test_output_publication_restores_all_roles_after_move_failure(
 
 
 def test_native_generation_is_finite_and_repeats_its_seed(
-    scan: tuple[Path, Path], conditioned_weights: Path, tiny_networks: None, tmp_path: Path, mx: Mlx
+    scan: tuple[Path, Path],
+    conditioned_weights: Path,
+    tiny_networks: None,
+    tmp_path: Path,
+    mx: MlxRuntime,
 ) -> None:
     """Stage overrides preserve fallback behavior and leave the mask fixed for LINet changes."""
 
@@ -581,7 +586,7 @@ def test_slab_vq_preserves_full_reconstruction_and_lesion_output(
     tiny_networks: None,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    mx: Mlx,
+    mx: MlxRuntime,
 ) -> None:
     """Exercise depth halos and global GroupNorm in both decoder passes on a real CT crop."""
     from lesiondiffusion_mlx import _slab_vq
@@ -639,7 +644,7 @@ def test_loaded_model_draws_match_one_shot_draws_and_rng(
     conditioned_weights: Path,
     tiny_networks: None,
     tmp_path: Path,
-    mx: Mlx,
+    mx: MlxRuntime,
 ) -> None:
     """A loaded model's draws equal one-shot draws and keep RNG progression."""
     if decoder_mode == "scaled_fp16" and not nax_available(mx):
@@ -750,7 +755,7 @@ def test_dpm_solver_runs_both_conditioned_stages_with_exact_call_counts(
     conditioned_weights: Path,
     tiny_networks: None,
     tmp_path: Path,
-    mx: Mlx,
+    mx: MlxRuntime,
     decoder_mode: str,
 ) -> None:
     """The explicit alternative reaches both networks and reports its exact schedule."""
@@ -801,7 +806,7 @@ def test_scaled_decoder_restores_cache_limit_after_native_failure(
     conditioned_weights: Path,
     tiny_networks: None,
     tmp_path: Path,
-    mx: Mlx,
+    mx: MlxRuntime,
     monkeypatch: pytest.MonkeyPatch,
     preset_gib: int,
 ) -> None:
@@ -811,7 +816,7 @@ def test_scaled_decoder_restores_cache_limit_after_native_failure(
     preset = preset_gib << 30
     observed: list[int] = []
 
-    def fail_encode(model: VqAutoencoder, array: Array, runtime: Mlx) -> Array:
+    def fail_encode(model: VqAutoencoder, array: Array, runtime: MlxRuntime) -> Array:
         """Observe the active policy at a real model boundary, then inject a failure."""
         active_limit = runtime.set_cache_limit(preset)
         runtime.set_cache_limit(active_limit)

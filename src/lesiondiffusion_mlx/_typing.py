@@ -8,16 +8,12 @@ from lesiondiffusion_mlx._arrays import HostArray as HostArray
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from typing import Literal, overload
 
     import mlx.core as mx
-    from medmlx_core.typing import FastRuntime as CoreFastRuntime
-    from medmlx_core.typing import MlxRuntime as CoreMlxRuntime
     from tokenizers import Encoding
 
     type Array = mx.array
     type Dtype = mx.Dtype
-    type ArrayValue = bool | int | float | complex | list[ArrayValue] | tuple[ArrayValue, ...]
 
     class TokenizerContract(Protocol):
         def enable_truncation(self, max_length: int) -> None:
@@ -31,108 +27,3 @@ if TYPE_CHECKING:
         def encode_batch(self, inputs: Sequence[str]) -> list[Encoding]:
             """Encode a batch of input strings."""
             ...
-
-    class MetalKernel(Protocol):
-        def __call__(
-            self,
-            *,
-            inputs: Sequence[Array],
-            template: Sequence[tuple[str, int | bool | Dtype]],
-            grid: tuple[int, int, int],
-            threadgroup: tuple[int, int, int],
-            output_shapes: Sequence[Sequence[int]],
-            output_dtypes: Sequence[Dtype],
-        ) -> list[Array]:
-            """Launch a Metal kernel and return its output arrays."""
-            ...
-
-    class Fast(CoreFastRuntime, Protocol):
-        """The part of ``mx.fast`` used here, with typed Metal-kernel construction."""
-
-        scaled_dot_product_attention = staticmethod(mx.fast.scaled_dot_product_attention)
-
-        def metal_kernel(
-            self,
-            name: str,
-            input_names: Sequence[str],
-            output_names: Sequence[str],
-            source: str,
-            header: str = "",
-            ensure_row_contiguous: bool = True,
-            atomic_outputs: bool = False,
-            compile_options: object | None = None,
-        ) -> MetalKernel:
-            """Compile a named Metal kernel with the supplied source."""
-            ...
-
-    class Random(Protocol):
-        normal = staticmethod(mx.random.normal)
-        seed = staticmethod(mx.random.seed)
-
-    class Mlx(CoreMlxRuntime, Protocol):
-        """Native ``mlx.core`` operations injected into the model and pipeline."""
-
-        def async_eval(self, *arrays: Array | Sequence[Array]) -> None:
-            """Submit arrays for asynchronous evaluation on their selected streams."""
-            ...
-
-        @property
-        def fast(self) -> Fast:
-            """Return native fast operations and Metal-kernel construction."""
-            ...
-
-        @property
-        def random(self) -> Random:
-            """Return native random generation operations."""
-            ...
-
-        @overload
-        def load(
-            self,
-            file: str,
-            /,
-            format: Literal["safetensors"],
-            return_metadata: Literal[False] = False,
-        ) -> dict[str, Array]:
-            """Load a safetensors file as a name-to-array mapping."""
-            ...
-
-        @overload
-        def load(
-            self, file: str, /, format: str | None = None, return_metadata: bool = False
-        ) -> Array | dict[str, Array] | tuple[dict[str, Array], dict[str, object]]:
-            """Load arrays, and optionally metadata, from a supported file format."""
-            ...
-
-        addmm = staticmethod(mx.addmm)
-        all = staticmethod(mx.all)
-        argmin = staticmethod(mx.argmin)
-        clear_cache = staticmethod(mx.clear_cache)
-        compile = staticmethod(mx.compile)
-        contiguous = staticmethod(mx.contiguous)
-        cos = staticmethod(mx.cos)
-        device_info = staticmethod(mx.device_info)
-        erf = staticmethod(mx.erf)
-        exp = staticmethod(mx.exp)
-        expm1 = staticmethod(mx.expm1)
-        full = staticmethod(mx.full)
-        isfinite = staticmethod(mx.isfinite)
-        log = staticmethod(mx.log)
-        reciprocal = staticmethod(mx.reciprocal)
-        set_cache_limit = staticmethod(mx.set_cache_limit)
-        sin = staticmethod(mx.sin)
-        softmax = staticmethod(mx.softmax)
-        sqrt = staticmethod(mx.sqrt)
-        sum = staticmethod(mx.sum)
-
-
-# Defined at runtime because callers pass it to ``typing.cast`` unquoted.
-class ArrayConstructor(Protocol):
-    def __call__(
-        self,
-        value: HostArray | Array | ArrayValue,
-        /,
-        dtype: Dtype | None = None,
-    ) -> Array:
-        """Construct a native array from values and an optional dtype."""
-        ...

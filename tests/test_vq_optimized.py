@@ -2,20 +2,21 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pytest
 
-from lesiondiffusion_mlx._typing import ArrayConstructor
 from lesiondiffusion_mlx._vq import nearest_codebook4
 from lesiondiffusion_mlx.mlx_model import VqAutoencoder
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Array, Mlx
+    from medmlx_core.typing import MlxRuntime
+
+    from lesiondiffusion_mlx._typing import Array
 
 
-def _nearest_reference(flat: Array, codebook: Array, mx: Mlx) -> tuple[Array, Array]:
+def _nearest_reference(flat: Array, codebook: Array, mx: MlxRuntime) -> tuple[Array, Array]:
     """Use the source distance expression, retaining each dtype rounding boundary."""
     norms = mx.sum((codebook * codebook).astype(mx.float32), axis=1).astype(codebook.dtype)
     latent_norms = mx.sum((flat * flat).astype(mx.float32), axis=1, keepdims=True).astype(
@@ -28,12 +29,12 @@ def _nearest_reference(flat: Array, codebook: Array, mx: Mlx) -> tuple[Array, Ar
 @pytest.mark.parametrize("dtype_name", ["float32", "float16"])
 @pytest.mark.parametrize("native_kernels", [True, False], ids=["native", "chunked"])
 def test_vq_preserves_quantized_values_on_strided_batches(
-    dtype_name: str, native_kernels: bool, mx: Mlx
+    dtype_name: str, native_kernels: bool, mx: MlxRuntime
 ) -> None:
     """Fused search must keep code selection and source straight-through rounding."""
     rng = np.random.default_rng(2701)
     dtype = getattr(mx, dtype_name)
-    array = cast(ArrayConstructor, mx.array)
+    array = mx.array
     codebook = array(rng.normal(size=(2048, 4)).astype(np.float32), dtype=dtype)
     z = array(rng.normal(size=(2, 4, 9, 8, 14)).astype(np.float32), dtype=dtype)[..., ::2]
     flat = mx.reshape(mx.transpose(z, (0, 2, 3, 4, 1)), (-1, 4))
@@ -57,7 +58,7 @@ def test_vq_preserves_quantized_values_on_strided_batches(
     "positions,entries", [(1, 2048), (2, 33), (3, 1), (31, 2), (32, 32), (33, 31)]
 )
 def test_nearest_codebook_preserves_first_index_at_rounding_ties(
-    dtype_name: str, positions: int, entries: int, mx: Mlx
+    dtype_name: str, positions: int, entries: int, mx: MlxRuntime
 ) -> None:
     """Duplicate entries, midpoint neighbors and NaNs retain MLX argmin's index order."""
     rng = np.random.default_rng(317)
@@ -70,7 +71,7 @@ def test_nearest_codebook_preserves_first_index_at_rounding_ties(
     ).astype(np.float32)
     host_points = np.tile(host_points, (positions // len(host_points) + 1, 1))[:positions]
     dtype = getattr(mx, dtype_name)
-    array = cast(ArrayConstructor, mx.array)
+    array = mx.array
     codebook = array(host_codebook, dtype=dtype)
     flat = array(host_points, dtype=dtype)
     expected, norms = _nearest_reference(flat, codebook, mx)
@@ -91,9 +92,9 @@ def test_nearest_codebook_preserves_first_index_at_rounding_ties(
     )
 
 
-def test_replacing_codebook_updates_cached_norms(mx: Mlx) -> None:
+def test_replacing_codebook_updates_cached_norms(mx: MlxRuntime) -> None:
     """A reused model must select from the current codebook after weight replacement."""
-    array = cast(ArrayConstructor, mx.array)
+    array = mx.array
     weights = {
         "quantize.embedding.weight": array(np.array([[0, 0, 0, 0], [2, 0, 0, 0]], np.float32))
     }

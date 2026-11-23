@@ -28,8 +28,9 @@ import numpy as np
 
 if TYPE_CHECKING:
     import numpy.typing as npt
+    from medmlx_core.typing import MlxRuntime
 
-    from lesiondiffusion_mlx._typing import Array, Mlx
+    from lesiondiffusion_mlx._typing import Array
 
 
 def _variant() -> bool:
@@ -59,7 +60,7 @@ def _host_inputs() -> tuple[
     return q, k, v, heads
 
 
-def _attention(q: Array, k: Array, v: Array, *, heads: int, native: bool, mx: Mlx) -> Array:
+def _attention(q: Array, k: Array, v: Array, *, heads: int, native: bool, mx: MlxRuntime) -> Array:
     """Use production direct-half attention or the prior padded fused MLX operation."""
     from lesiondiffusion_mlx._attention import flash_attention
 
@@ -83,12 +84,11 @@ def attention_case() -> dict[str, object]:
     from medmlx_core.runtime import import_mlx
 
     from lesiondiffusion_mlx._attention import flash_eligible
-    from lesiondiffusion_mlx._typing import ArrayConstructor
 
-    mx = cast("Mlx", import_mlx())
+    mx = cast("MlxRuntime", import_mlx())
     native = _variant()
     host_q, host_k, host_v, heads = _host_inputs()
-    array = cast(ArrayConstructor, mx.array)
+    array = mx.array
     q, k, v = array(host_q), array(host_k), array(host_v)
     if native and not flash_eligible(q, k, heads, mx):
         raise RuntimeError("Native half attention requires enabled NAX on this host")
@@ -128,10 +128,9 @@ def parity_attention(
     from medmlx_core.runtime import import_mlx
 
     from lesiondiffusion_mlx._attention import flash_eligible
-    from lesiondiffusion_mlx._typing import ArrayConstructor
 
-    mx = cast("Mlx", import_mlx())
-    array = cast(ArrayConstructor, mx.array)
+    mx = cast("MlxRuntime", import_mlx())
+    array = mx.array
     queries, keys, values = array(q), array(k), array(v)
     if native and not flash_eligible(queries, keys, heads, mx):
         raise RuntimeError("Native half attention requires enabled NAX on this host")
@@ -151,7 +150,7 @@ def _padded_half_attention() -> Generator[None]:
 
     original = mlx_model.flash_eligible
 
-    def eligible(q: Array, k: Array, heads: int, mx: Mlx) -> bool:
+    def eligible(q: Array, k: Array, heads: int, mx: MlxRuntime) -> bool:
         return q.dtype != mx.float16 and original(q, k, heads, mx)
 
     mlx_model.flash_eligible = eligible
@@ -162,7 +161,7 @@ def _padded_half_attention() -> Generator[None]:
 
 
 def _denoiser(
-    weights_path: Path, context: Array, *, native: bool, mx: Mlx
+    weights_path: Path, context: Array, *, native: bool, mx: MlxRuntime
 ) -> Callable[[Array, Array], Array]:
     """Load one conditioned LINet and bind evaluated text projections before timing."""
     from lesiondiffusion_mlx._nax_conv import nax_available
@@ -195,7 +194,7 @@ def denoiser_case() -> dict[str, object]:
     """Load a real captured LINet input and the selected compiled denoiser."""
     from medmlx_core.runtime import import_mlx
 
-    mx = cast("Mlx", import_mlx())
+    mx = cast("MlxRuntime", import_mlx())
     native = _variant()
     arrays = mx.load(os.environ["LESION_BENCH_FIXTURE"], format="safetensors")
     forward = _denoiser(
@@ -218,7 +217,7 @@ def denoiser_parity_case() -> dict[str, object]:
     """Export captured LINet inputs to independent reference and candidate workers."""
     from medmlx_core.runtime import import_mlx
 
-    mx = cast("Mlx", import_mlx())
+    mx = cast("MlxRuntime", import_mlx())
     arrays = mx.load(os.environ["LESION_BENCH_FIXTURE"], format="safetensors")
     return {
         "name": f"linet-attention-half-{tuple(arrays['network_input'].shape)}",
@@ -242,9 +241,8 @@ def parity_denoiser(
     """Compare real LINet predictions when only half self-attention changes."""
     from medmlx_core.runtime import import_mlx
 
-    from lesiondiffusion_mlx._typing import ArrayConstructor
 
-    mx = cast("Mlx", import_mlx())
-    array = cast(ArrayConstructor, mx.array)
+    mx = cast("MlxRuntime", import_mlx())
+    array = mx.array
     forward = _denoiser(Path(weights_path), array(context), native=native, mx=mx)
     return np.array(forward(array(x), array(timestep)), dtype=np.float32)

@@ -9,13 +9,14 @@ trajectory, distinct from the stochastic source DDIM sampler.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from lesiondiffusion_mlx._schedules import dpm_solver_timesteps
-from lesiondiffusion_mlx._typing import ArrayConstructor
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Array, Mlx
+    from medmlx_core.typing import MlxRuntime
+
+    from lesiondiffusion_mlx._typing import Array
 
 
 class Dpmpp2mSampler:
@@ -27,11 +28,11 @@ class Dpmpp2mSampler:
     per-step stochastic draw or eta parameter.
     """
 
-    def __init__(self, alphas_cumprod: Array, mx: Mlx, steps: int):
+    def __init__(self, alphas_cumprod: Array, mx: MlxRuntime, steps: int):
         """Prepare the reference linspace schedule and FP32 update coefficients."""
         self.mx = mx
         self.timesteps = dpm_solver_timesteps(steps, int(alphas_cumprod.shape[0]))
-        indices = cast(ArrayConstructor, mx.array)(self.timesteps, dtype=mx.int32)
+        indices = mx.array(self.timesteps, dtype=mx.int32)
         abar = alphas_cumprod[indices].astype(mx.float32)
         # The reference first computes sigma/alpha, then reconstructs VP
         # alpha and sigma from that ratio. Retain those rounding boundaries.
@@ -44,8 +45,8 @@ class Dpmpp2mSampler:
             raise ValueError(
                 "DPM-Solver++ needs finite sampled alphas strictly between zero and one"
             )
-        zero = cast(ArrayConstructor, mx.array)(0, dtype=mx.float32)
-        one = cast(ArrayConstructor, mx.array)(1, dtype=mx.float32)
+        zero = mx.array(0, dtype=mx.float32)
+        one = mx.array(1, dtype=mx.float32)
         coefficients: list[Array] = []
         for index in range(len(self.timesteps)):
             if index == len(self.timesteps) - 1:

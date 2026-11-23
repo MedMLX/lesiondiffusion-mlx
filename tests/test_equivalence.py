@@ -8,7 +8,9 @@ from lesiondiffusion_mlx._arrays import HostArray, NumericArray
 from lesiondiffusion_mlx._reference import REFERENCE
 
 if TYPE_CHECKING:
-    from lesiondiffusion_mlx._typing import Array, Dtype, Mlx
+    from medmlx_core.typing import MlxRuntime
+
+    from lesiondiffusion_mlx._typing import Array, Dtype
     from tests._fixture_models import ArrayFactory
 
 import json
@@ -18,7 +20,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from lesiondiffusion_mlx._typing import ArrayConstructor
 from lesiondiffusion_mlx.mlx_model import BiomedTextEncoder, LdmUnet, UnetConfig, VqAutoencoder
 from lesiondiffusion_mlx.mlx_pipeline import (
     encode_attributes,
@@ -74,7 +75,7 @@ def assert_numerical(actual: Array | HostArray, expected: HostArray) -> None:
 
 
 @pytest.mark.parametrize("name", ["unet_mask", "unet_inpainting"])
-def test_unet_reference(name: str, mx: Mlx) -> None:
+def test_unet_reference(name: str, mx: MlxRuntime) -> None:
     """Compare seeded native UNet output with the source recording."""
     fixture = reference(name)
     config_data = json.loads(fixture["config"].item())
@@ -89,16 +90,16 @@ def test_unet_reference(name: str, mx: Mlx) -> None:
     )
     model = LdmUnet(weights, mx, config)
     result = model(
-        cast(ArrayConstructor, mx.array)(fixture["x"]),
-        cast(ArrayConstructor, mx.array)(fixture["timesteps"]),
-        cast(ArrayConstructor, mx.array)(fixture["context"]),
+        mx.array(fixture["x"]),
+        mx.array(fixture["timesteps"]),
+        mx.array(fixture["context"]),
     )
     assert_numerical(result, fixture["output"])
 
 
 @pytest.mark.parametrize("name", ["unet_mask", "unet_inpainting"])
 def test_chunked_source_attention_is_bitwise_whole(
-    name: str, mx: Mlx, monkeypatch: pytest.MonkeyPatch
+    name: str, mx: MlxRuntime, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Query-row chunking of explicit attention must not change any output bit.
 
@@ -120,23 +121,19 @@ def test_chunked_source_attention_is_bitwise_whole(
         skip_context=config.skip_context,
     )
     model = LdmUnet(weights, mx, config)
-    inputs = [
-        cast(ArrayConstructor, mx.array)(fixture[key]) for key in ("x", "timesteps", "context")
-    ]
+    inputs = [mx.array(fixture[key]) for key in ("x", "timesteps", "context")]
     whole = cast(HostArray, np.array(model(*inputs)))
     monkeypatch.setattr(mlx_model, "_SIMILARITY_CHUNK_BYTES", 4096)
     assert_bits(model(*inputs), whole)
 
 
 @pytest.mark.parametrize("name", ["silu", "softmax"])
-def test_unet_half_activations_reference(name: str, mx: Mlx) -> None:
+def test_unet_half_activations_reference(name: str, mx: MlxRuntime) -> None:
     """Compare half-precision UNet activations with the source recording."""
     fixture = reference("unet_activations")
     expected = fixture[name + "_output"]
     model = LdmUnet({}, mx, UnetConfig(32, 1, (1, 2)))
-    actual = np.array(
-        getattr(model, name)(cast(ArrayConstructor, mx.array)(fixture[name + "_input"]))
-    )
+    actual = np.array(getattr(model, name)(mx.array(fixture[name + "_input"])))
     assert actual.dtype == expected.dtype
     error = np.abs(actual.astype(np.float32) - expected.astype(np.float32))
     ulps = error / np.abs(np.spacing(expected)).astype(np.float32)
@@ -149,7 +146,7 @@ def test_unet_half_activations_reference(name: str, mx: Mlx) -> None:
 
 
 @pytest.mark.parametrize("dtype_name", ["float32", "float16"])
-def test_vq_reference(dtype_name: str, mx: Mlx) -> None:
+def test_vq_reference(dtype_name: str, mx: MlxRuntime) -> None:
     """Compare the native VQ network with recorded source output."""
     fixture = reference("vq_" + dtype_name)
     dtype = getattr(mx, dtype_name)
@@ -157,8 +154,8 @@ def test_vq_reference(dtype_name: str, mx: Mlx) -> None:
         vq_weights(int(fixture["weight_seed"]), cast("ArrayFactory[Array, Dtype]", mx), dtype), mx
     )
     x, z = (
-        cast(ArrayConstructor, mx.array)(fixture["x"], dtype=dtype),
-        cast(ArrayConstructor, mx.array)(fixture["z"], dtype=dtype),
+        mx.array(fixture["x"], dtype=dtype),
+        mx.array(fixture["z"], dtype=dtype),
     )
     assert_numerical(model.encode(x), fixture["encoded"])
     assert_bits(model.quantize(z, chunk_size=3), fixture["quantized"])
@@ -167,7 +164,7 @@ def test_vq_reference(dtype_name: str, mx: Mlx) -> None:
 
 
 @pytest.fixture(scope="module")
-def text_model(mx: Mlx) -> BiomedTextEncoder:
+def text_model(mx: MlxRuntime) -> BiomedTextEncoder:
     """Provide the seeded native text model and fixture."""
     fixture = reference("text")
     return BiomedTextEncoder(
@@ -175,15 +172,15 @@ def text_model(mx: Mlx) -> BiomedTextEncoder:
     )
 
 
-def test_text_reference(mx: Mlx, text_model: BiomedTextEncoder) -> None:
+def test_text_reference(mx: MlxRuntime, text_model: BiomedTextEncoder) -> None:
     """Compare native text encoding with the source recording."""
     fixture = reference("text")
-    assert_numerical(
-        text_model(cast(ArrayConstructor, mx.array)(fixture["tokens"])), fixture["output"]
-    )
+    assert_numerical(text_model(mx.array(fixture["tokens"])), fixture["output"])
 
 
-def test_attributes_reference(mx: Mlx, text_model: BiomedTextEncoder, tmp_path: Path) -> None:
+def test_attributes_reference(
+    mx: MlxRuntime, text_model: BiomedTextEncoder, tmp_path: Path
+) -> None:
     """Compare generated text attributes with the source recording."""
     fixture = reference("attributes")
     tokenizer_path = tmp_path / "tokenizer.json"
@@ -195,12 +192,10 @@ def test_attributes_reference(mx: Mlx, text_model: BiomedTextEncoder, tmp_path: 
 
 
 @pytest.mark.parametrize("name", ["ddim_mask", "ddim_inpainting"])
-def test_ddim_reference(name: str, mx: Mlx) -> None:
+def test_ddim_reference(name: str, mx: MlxRuntime) -> None:
     """Compare native DDIM sampling with the source recording."""
     fixture = reference(name)
-    sampler = DdimSampler(
-        cast(ArrayConstructor, mx.array)(fixture["alphas"]), mx, int(fixture["steps"])
-    )
+    sampler = DdimSampler(mx.array(fixture["alphas"]), mx, int(fixture["steps"]))
     assert np.array_equal(sampler.timesteps, fixture["timesteps"])
     for attr, key in (
         ("alphas", "alphas_selected"),
@@ -209,41 +204,35 @@ def test_ddim_reference(name: str, mx: Mlx) -> None:
         ("sigmas", "sigmas"),
     ):
         assert_numerical(getattr(sampler, attr), fixture[key])
-    mask = cast(ArrayConstructor, mx.array)(fixture["mask"]) if "mask" in fixture else None
+    mask = mx.array(fixture["mask"]) if "mask" in fixture else None
     denoiser = sampling_denoiser(mx)
     condition, image = (
-        cast(ArrayConstructor, mx.array)(fixture["condition"]),
-        cast(ArrayConstructor, mx.array)(fixture["image"]),
+        mx.array(fixture["condition"]),
+        mx.array(fixture["image"]),
     )
     result = sampler(
         denoiser,
         condition,
         image,
-        initial_noise=cast(ArrayConstructor, mx.array)(fixture["initial"]),
-        step_noise=tuple(cast(ArrayConstructor, mx.array)(value) for value in fixture["noise"]),
+        initial_noise=mx.array(fixture["initial"]),
+        step_noise=tuple(mx.array(value) for value in fixture["noise"]),
         mask=mask,
     )
     assert_numerical(result, fixture["output"])
 
 
-def test_pipeline_reference(mx: Mlx) -> None:
+def test_pipeline_reference(mx: MlxRuntime) -> None:
     """Compare the native generation pipeline with the source recording."""
     fixture = reference("pipeline")
     assert_bits(ras_to_source(fixture["orientation"]), fixture["source"])
     assert_bits(source_to_ras(fixture["source"]), fixture["orientation"])
-    assert_numerical(
-        piecewise_ct(cast(ArrayConstructor, mx.array)(fixture["ct"]), mx), fixture["ct_output"]
-    )
+    assert_numerical(piecewise_ct(mx.array(fixture["ct"]), mx), fixture["ct_output"])
     # HU values require an absolute bound at zero. Four float32 ulps at the
     # 1000 HU clamp cover affine rounding; Metal's observed error was 1.53e-5 HU.
     np.testing.assert_allclose(
         cast(
             NumericArray,
-            np.array(
-                piecewise_ct(
-                    cast(ArrayConstructor, mx.array)(fixture["normalized"]), mx, inverse=True
-                )
-            ),
+            np.array(piecewise_ct(mx.array(fixture["normalized"]), mx, inverse=True)),
         ),
         cast(NumericArray, fixture["inverse_output"]),
         atol=4 * np.spacing(np.float32(1000)),
@@ -254,7 +243,7 @@ def test_pipeline_reference(mx: Mlx) -> None:
         mx,
     )
     for prefix in ("odd", "long"):
-        x = cast(ArrayConstructor, mx.array)(fixture[prefix + "_input"], dtype=mx.float16)
+        x = mx.array(fixture[prefix + "_input"], dtype=mx.float16)
         assert_numerical(encode_source(model, x, mx), fixture[prefix + "_output"])
 
 
