@@ -18,6 +18,7 @@ from lesioncontrol.backend import require_metal
 from lesioncontrol.placement import (
     OVERHANG,
     SURFACE_OVERHANGS,
+    filled,
     liver_center,
     rescaled,
     touches_face,
@@ -98,7 +99,8 @@ def synthesize(
     draws 12 contour proposals by default, each with its own seed, and LINet
     does not run on them. LMNet runs 12 diffusion steps for a proposal unless
     ``proposal_steps`` sets another count; LINet runs ``steps``.
-    Each contour is scaled along its principal axes to the reference volume,
+    Holes that a contour's axial sections enclose are filled, before and after
+    each contour is scaled along its principal axes to the reference volume,
     elongation and flatness, then scored by the mean Canberra distance over
     sphericity, maximum diameter and solidity. A supplied outline runs LINet
     once and is used as given.
@@ -230,12 +232,17 @@ def synthesize(
                 mask_path = stage / "proposals" / f"{seed + index}.nii.gz"
                 _write_mask(proposal, affine, mask_path)
                 drawn = read_mask(mask_path, affine, shape=clean.shape, connected=True)
-                # The mask model's contours average 15% under the requested volume
-                # and have axis ratios of their own.
+                # The mask model's contours average 15% under the requested volume,
+                # have axis ratios of their own and can be pierced by tunnels.
+                # Scaling can tilt a remaining concavity into an axial hole.
                 contour = (
                     drawn
                     if touches_face(drawn)
-                    else rescaled(drawn, round(target.shape[0]), target.shape[2], target.shape[3])
+                    else filled(
+                        rescaled(
+                            filled(drawn), round(target.shape[0]), target.shape[2], target.shape[3]
+                        )
+                    )
                 )
                 score = measure(index, drawn, contour, mask_path)
                 if not touches_face(contour):

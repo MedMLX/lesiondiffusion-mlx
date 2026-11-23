@@ -31,16 +31,16 @@ least 152 × 152 × 128 voxels on a 1 mm RAS grid.
 
 The reference supplies box dimensions, shape measurements and attenuation
 summaries. Reuse a profile on another patient's liver to generate a lesion with
-that phenotype. LMNet proposes 12 contours at one site; `--candidates` sets
-the number. LesionControl scales each contour along its principal axes to the
-reference volume, elongation and flatness, and selects the closest complete
-contour by sphericity, maximum diameter and solidity. LINet runs once, on
-the selected contour, to supply the spatial texture. LMNet runs 12 steps for
-each proposal; `--proposal-steps` sets another count. Calibration adjusts its
-mean, rim-to-core trend, coarse variation and excessive sharpness at the liver
-interface when the profile includes a reference liver mask. With that mask,
-reference voxels within 2 mm of the liver surface do not contribute to the
-texture targets.
+that phenotype. LMNet proposes 12 contours at one site, with 12 diffusion
+steps each; `--candidates` and `--proposal-steps` set other counts.
+LesionControl fills the holes that a contour's axial sections enclose, scales
+each contour along its principal axes to the reference volume, elongation and
+flatness, and selects the closest complete contour by sphericity, maximum
+diameter and solidity. LINet runs once, on the selected contour, to supply the
+spatial texture. Calibration adjusts its mean, rim-to-core trend, coarse
+variation and excessive sharpness at the liver interface when the profile
+includes a reference liver mask. With that mask, reference voxels within 2 mm
+of the liver surface do not contribute to the texture targets.
 
 With `liver_contrast` targets, the lesion keeps the host scan's own sub-2 mm
 noise, scaled to the reference's lesion-to-liver ratio, so its grain follows

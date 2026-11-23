@@ -12,7 +12,7 @@ from hcc_fixture import ct_cube
 from numpy.typing import NDArray
 from scipy import ndimage
 
-from lesioncontrol.placement import OVERHANG, rescaled, translated_placement
+from lesioncontrol.placement import OVERHANG, filled, rescaled, translated_placement
 from lesioncontrol.profile import (
     ReferenceProfile,
     build_profile,
@@ -204,6 +204,19 @@ def test_rescaling_matches_the_ellipsoid_drawn_with_the_requested_axes(
     assert scaled.sum() == pytest.approx(drawn.sum(), rel=0.005)
     # Each voxelization moves the surface by up to half a voxel; unscaled overlap is under 0.86.
     assert 2 * (scaled & drawn).sum() / (scaled.sum() + drawn.sum()) > 0.96
+
+
+def test_filling_closes_axial_holes_and_keeps_open_clefts() -> None:
+    """A tunnel along the axial axis is filled; one that crosses the sections stays open."""
+    block = np.zeros((20, 20, 20), dtype=np.bool_)
+    block[4:16, 4:16, 4:16] = True
+    pierced = block.copy()
+    pierced[9:11, 9:11, :] = False
+    np.testing.assert_array_equal(filled(pierced), block)
+    # This channel splits two axial sections in half and encloses nothing in them.
+    crossed = block.copy()
+    crossed[:, 9:11, 9:11] = False
+    np.testing.assert_array_equal(filled(crossed), crossed)
 
 
 def test_solidity_is_the_share_of_the_convex_hull_a_contour_fills() -> None:

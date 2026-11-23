@@ -48,6 +48,25 @@ def _largest(mask: Mask) -> Mask:
     return labels == 1 + int(np.argmax(np.bincount(labels.ravel())[1:]))
 
 
+def filled(mask: Mask) -> Mask:
+    """Fill the holes that each axial section of a contour encloses.
+
+    Expert outlines are drawn section by section and include everything they
+    enclose, so real lesion masks rarely have a hole in an axial section. The
+    mask model's contours can be pierced by tunnels. A cleft that reaches the
+    edge of its section stays open.
+    """
+    result = mask.copy()
+    points = np.argwhere(mask)
+    if not len(points):
+        return result
+    low, high = points.min(axis=0), points.max(axis=0) + 1
+    for index in range(low[2], high[2]):
+        section = (slice(low[0], high[0]), slice(low[1], high[1]), index)
+        result[section] = ndimage.binary_fill_holes(mask[section])
+    return result
+
+
 def rescaled(mask: Mask, voxels: int, elongation: float, flatness: float) -> Mask:
     """Scale a contour along its principal axes to a requested volume and axis ratios.
 
