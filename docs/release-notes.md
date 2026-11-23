@@ -1,11 +1,30 @@
 # Release notes
 
-## Unreleased
+## 0.4.0
 
-**`vq_mode="slab"` runs large CTs with lower MLX memory.** In conditioned
-inference with the reference decoder, it stages VQ activations on temporary
-disk storage and retains whole-volume normalization and reconstruction.
-A 440×440×248 abdominal CT used 2.81 GB peak MLX memory on M1 Max with DDIM20.
+### Breaking changes
+
+**Organ, anatomy and lesion masks must be 3D real-valued NIfTI-1 or NIfTI-2 files.** Non-NIfTI formats, 2D volumes, complex or boolean data and unknown spatial unit codes now raise `InvalidInputError`. Meter and micron headers are converted to millimeters.
+
+**Requires `medmlx-core[nifti]>=0.3.2,<0.4`** (was `>=0.3,<0.4`).
+
+### New
+
+**`vq_mode="slab"` reconstructs large CTs with less MLX memory.** It stages VQ activations in temporary files, so it needs free space on `TMPDIR` or the system temp volume, and it requires `inference_mode="conditioned"` and `decoder_mode="reference"`. A 440×440×248 abdominal CT used 2.81 GB peak MLX memory on an M1 Max with 20 diffusion steps, against 92.4 GB in the default mode at 200 steps.
+
+**`draw_lesion_masks` draws LMNet lesion masks for several seeds without inpainting.** Each mask equals the `mask` output of `run` for that seed and box center. Pass a chosen mask to `run` as `lesion_mask_path`.
+
+```python
+from lesiondiffusion_mlx import draw_lesion_masks
+
+masks = draw_lesion_masks(
+    image_path="ct.nii.gz", organ_mask_path="liver.nii.gz", organ="liver",
+    lesion_type="tumor", bbox_size_mm=[30, 30, 20],
+    bbox_center_voxel=[80, 80, 64], seeds=[1, 2, 3],
+)
+```
+
+**`details` in the `run` result records `vq_mode`.**
 
 ## 0.3.0
 

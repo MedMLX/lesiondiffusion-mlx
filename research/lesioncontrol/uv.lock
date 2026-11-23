@@ -158,10 +158,10 @@ wheels = [
 
 [[package]]
 name = "lesiondiffusion-mlx"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "../../" }
 dependencies = [
-    { name = "medmlx-core" },
+    { name = "medmlx-core", extra = ["nifti"] },
     { name = "mlx" },
     { name = "nibabel" },
     { name = "numpy" },
@@ -175,7 +175,7 @@ requires-dist = [
     { name = "einops", marker = "extra == 'dev'", specifier = ">=0.8.1,<0.9" },
     { name = "einops", marker = "extra == 'reference'", specifier = "==0.8.2" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.100,<7" },
-    { name = "medmlx-core", specifier = ">=0.3,<0.4" },
+    { name = "medmlx-core", extras = ["nifti"], specifier = ">=0.3.2,<0.4" },
     { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = "==0.32.4" },
     { name = "nibabel", specifier = ">=5.3,<6" },
     { name = "numpy", specifier = ">=2.2,<3" },
@@ -195,13 +195,18 @@ provides-extras = ["dev", "reference"]
 
 [[package]]
 name = "medmlx-core"
-version = "0.3.1"
+version = "0.3.2"
 source = { editable = "../../../medmlx/packages/core" }
 dependencies = [
     { name = "httpx" },
     { name = "huggingface-hub" },
     { name = "mlx" },
     { name = "numpy" },
+]
+
+[package.optional-dependencies]
+nifti = [
+    { name = "nibabel" },
 ]
 
 [package.metadata]
@@ -212,6 +217,7 @@ requires-dist = [
     { name = "mlx", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = ">=0.32.4,<0.33" },
     { name = "monai", marker = "extra == 'dev'", specifier = "==1.6.1" },
     { name = "nibabel", marker = "extra == 'dev'", specifier = ">=5.4.2,<6" },
+    { name = "nibabel", marker = "extra == 'nifti'", specifier = ">=5.4.2,<6" },
     { name = "numpy", specifier = ">=2.0,<3" },
     { name = "numpy", marker = "extra == 'dev'", specifier = ">=2.2,<3" },
     { name = "pillow", marker = "extra == 'dev'", specifier = ">=13,<14" },
@@ -221,7 +227,7 @@ requires-dist = [
     { name = "torch", marker = "extra == 'conversion'", specifier = ">=2.6,<3" },
     { name = "torch", marker = "extra == 'dev'", specifier = "==2.14.1" },
 ]
-provides-extras = ["conversion", "dev"]
+provides-extras = ["conversion", "nifti", "dev"]
 
 [[package]]
 name = "medmlx-lesioncontrol"
