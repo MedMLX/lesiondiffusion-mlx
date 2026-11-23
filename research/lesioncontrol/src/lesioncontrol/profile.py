@@ -154,13 +154,18 @@ class PreparedHost:
     known_tumor_mask_path: Path | None
 
 
-def _read(path: Path, affine: Affine | None = None) -> tuple[FloatImage, Affine]:
+def read_image(
+    path: Path, affine: Affine | None = None, *, shape: tuple[int, ...] | None = (128, 128, 128)
+) -> tuple[FloatImage, Affine]:
+    """Read a finite RAS 1 mm image and check the caller's expected grid."""
     image = nib.Nifti1Image.from_filename(str(path))
     if image.header.get_xyzt_units()[0] not in ("mm", "unknown"):
         raise ValueError(f"{path}: prepared spatial units must be mm or unspecified")
     matrix = np.asarray(image.affine, dtype=np.float64)
-    if image.shape != (128, 128, 128) or not np.isfinite(matrix).all():
-        raise ValueError(f"{path}: V0 requires a finite-affine 128³ image")
+    if len(image.shape) != 3 or (shape is not None and image.shape != shape):
+        raise ValueError(f"{path}: expected a 3D image on the requested grid {shape}")
+    if not np.isfinite(matrix).all():
+        raise ValueError(f"{path}: image affine must be finite")
     if not np.allclose(matrix[:3, :3], np.eye(3), rtol=0, atol=1e-5):
         raise ValueError(f"{path}: V0 requires an axis-aligned 1 mm RAS grid")
     if affine is not None and not np.allclose(matrix, affine, rtol=0, atol=1e-5):
@@ -171,8 +176,16 @@ def _read(path: Path, affine: Affine | None = None) -> tuple[FloatImage, Affine]
     return values, matrix
 
 
-def _mask(path: Path, affine: Affine, *, connected: bool = False, empty: bool = False) -> Mask:
-    values, _ = _read(path, affine)
+def read_mask(
+    path: Path,
+    affine: Affine,
+    *,
+    connected: bool = False,
+    empty: bool = False,
+    shape: tuple[int, ...] = (128, 128, 128),
+) -> Mask:
+    """Read binary labels on the specified CT grid."""
+    values, _ = read_image(path, affine, shape=shape)
     if not np.isin(values, (0, 1)).all():
         raise ValueError(f"{path}: requires binary 0/1 labels")
     mask = values.astype(np.bool_)
@@ -183,7 +196,8 @@ def _mask(path: Path, affine: Affine, *, connected: bool = False, empty: bool = 
     return mask
 
 
-def _ring(mask: Mask, liver: Mask) -> Mask:
+def liver_ring(mask: Mask, liver: Mask) -> Mask:
+    """Return the 3–10 mm liver shell on the prepared 1 mm grid."""
     distance = ndimage.distance_transform_edt(~mask)
     ring = liver & ~mask & (distance >= 3) & (distance <= 10)
     if not ring.any():
@@ -213,17 +227,20 @@ def build_profile(
     reference_liver_mask: Path | None = None,
     target_space: TargetSpace = "absolute_hu",
     qc_record: Mapping[str, object] | None = None,
+    *,
+    spatial: bool = False,
 ) -> ReferenceProfile:
     """Profile one qualified reference; contrast centering precedes discretization."""
     target_space = _space(target_space)
     _check_reference_quarantine(qc_record)
-    image, affine = _read(Path(reference_image))
-    mask = _mask(Path(reference_mask), affine, connected=True)
+    image, affine = read_image(Path(reference_image))
+    mask = read_mask(Path(reference_mask), affine, connected=True)
+    liver: Mask | None = None
     ring_mean: float | None = None
     ring_voxels = 0
     if reference_liver_mask is not None:
-        liver = _mask(Path(reference_liver_mask), affine)
-        ring = _ring(mask, liver)
+        liver = read_mask(Path(reference_liver_mask), affine)
+        ring = liver_ring(mask, liver)
         ring_mean = float(np.mean(image[ring], dtype=np.float64))
         ring_voxels = int(ring.sum())
     if target_space == "liver_contrast" and ring_mean is None:
@@ -242,9 +259,34 @@ def build_profile(
         "qc_record": dict(qc_record) if qc_record is not None else {},
         "conditioning_inputs": "Reference appearance features are supplied targets",
     }
-    return ReferenceProfile(
-        extract_features(centered, mask, settings), target_space, settings, metadata
-    )
+    features = extract_features(centered, mask, settings)
+    if spatial:
+        from lesioncontrol.spatial import SpatialTarget
+
+        metadata["spatial_v1"] = asdict(SpatialTarget.measure(image, mask, liver))
+    return ReferenceProfile(features, target_space, settings, metadata)
+
+
+def load_clean_liver(
+    image: Path,
+    liver_mask: Path,
+    known_tumor_mask: Path | None,
+    declared_clean: bool,
+    *,
+    shape: tuple[int, ...] | None = (128, 128, 128),
+) -> tuple[FloatImage, Affine, Mask]:
+    """Check tumor exclusion on the entire input encoded by LINet."""
+    declared_clean = _boolean(declared_clean, "declared_clean")
+    if known_tumor_mask is None and not declared_clean:
+        raise ValueError("Supply known-tumor exclusion or explicitly declare this host clean")
+    values, affine = read_image(image, shape=shape)
+    liver = read_mask(liver_mask, affine, shape=values.shape)
+    if (
+        known_tumor_mask is not None
+        and read_mask(known_tumor_mask, affine, shape=values.shape, empty=True).any()
+    ):
+        raise ValueError("Known original tumor remains in the full encoded host input")
+    return values, affine, liver
 
 
 def load_host(
@@ -259,19 +301,13 @@ def load_host(
     Partial liver overlap is allowed for an explicit exophytic placement. The
     liver mask and supplied outline are never clipped or unioned together.
     """
-    declared_clean = _boolean(declared_clean, "declared_clean")
-    if known_tumor_mask is None and not declared_clean:
-        raise ValueError("Supply known-tumor exclusion or explicitly declare this host clean")
-    values, affine = _read(Path(image))
-    liver = _mask(Path(liver_mask), affine)
-    lesion = _mask(Path(placement_mask), affine, connected=True)
+    values, affine, liver = load_clean_liver(image, liver_mask, known_tumor_mask, declared_clean)
+    lesion = read_mask(Path(placement_mask), affine, connected=True)
     if not np.any(liver & lesion):
         raise ValueError("Placement must overlap the selected liver")
     if not lesion[::-1].transpose(2, 1, 0)[::2, ::2, ::2].any():
         raise ValueError("Placement has no voxel on LINet's half-resolution latent grid")
-    if known_tumor_mask is not None and _mask(Path(known_tumor_mask), affine, empty=True).any():
-        raise ValueError("Known original tumor remains in the full encoded host input")
-    ring = _ring(lesion, liver)
+    ring = liver_ring(lesion, liver)
     return PreparedHost(
         Path(image).resolve(),
         Path(liver_mask).resolve(),
@@ -291,7 +327,7 @@ def extract_generated_features(
     profile: ReferenceProfile, host: PreparedHost, generated_image_path: Path
 ) -> dict[str, float]:
     """Use the fixed clean-host ring for contrast targets, never the generated ring."""
-    image, _ = _read(Path(generated_image_path), host.affine)
+    image, _ = read_image(Path(generated_image_path), host.affine)
     if profile.target_space == "liver_contrast":
         image = image - np.float32(host.ring_mean_hu)
     return extract_features(image, host.placement_mask, profile.settings)

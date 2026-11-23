@@ -28,6 +28,9 @@ def main() -> None:
     profile.add_argument("--mask", type=Path, required=True)
     profile.add_argument("--liver-mask", type=Path)
     profile.add_argument("--qc-record", type=Path, help="Reference QC object in JSON")
+    profile.add_argument(
+        "--spatial", action="store_true", help="Include 3D shape and regional HU targets"
+    )
     profile.add_argument("--target-space", choices=("absolute_hu", "liver_contrast"), required=True)
     profile.add_argument("--target", action="append", default=[], metavar="FEATURE=VALUE")
     profile.add_argument("--output", type=Path, required=True)
@@ -59,8 +62,65 @@ def main() -> None:
     sample.add_argument("--retained-steps", type=int, default=25)
     sample.add_argument("--seed", type=int, required=True)
     sample.add_argument("--output", type=Path, required=True)
+    synth = commands.add_parser("synthesize", help="Generate liver lesions from a spatial profile")
+    synth.add_argument("--profile", type=Path, required=True)
+    synth.add_argument("--host", type=Path, required=True)
+    synth.add_argument("--liver-mask", type=Path, required=True)
+    synth.add_argument("--known-tumor-mask", type=Path)
+    synth.add_argument("--declared-clean", action="store_true")
+    position = synth.add_mutually_exclusive_group()
+    position.add_argument("--center", type=int, nargs=3, metavar=("I", "J", "K"))
+    position.add_argument("--placement-mask", type=Path)
+    position.add_argument("--match-liver-surface", action="store_true")
+    synth.add_argument("--weights", type=Path, required=True)
+    synth.add_argument("--candidates", type=int)
+    synth.add_argument("--max-translation-mm", type=float)
+    synth.add_argument(
+        "--reference-noise",
+        action="store_true",
+        help="Use the reference's fine-texture HU amplitude instead of the host scan's noise",
+    )
+    synth.add_argument("--steps", type=int, default=25)
+    synth.add_argument(
+        "--proposal-steps",
+        type=int,
+        help="LMNet steps for the contour proposals instead of --steps",
+    )
+    synth.add_argument("--seed", type=int, required=True)
+    synth.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     from lesioncontrol.profile import build_profile, load_host, load_profile, save_profile
+
+    if args.command == "synthesize":
+        from lesioncontrol.synthesis import synthesize
+
+        record = synthesize(
+            load_profile(args.profile),
+            host=args.host,
+            liver_mask=args.liver_mask,
+            known_tumor_mask=args.known_tumor_mask,
+            declared_clean=args.declared_clean,
+            weights=args.weights,
+            output_dir=args.output,
+            seed=args.seed,
+            candidates=args.candidates,
+            max_translation_mm=args.max_translation_mm,
+            match_liver_surface=args.match_liver_surface,
+            reference_noise=args.reference_noise,
+            steps=args.steps,
+            proposal_steps=args.proposal_steps,
+            center=tuple(args.center) if args.center else None,
+            placement_mask=args.placement_mask,
+        )
+        print(
+            json.dumps(
+                {
+                    "image": str(args.output / "synthetic_ct.nii.gz"),
+                    "selected_index": record["selected_index"],
+                }
+            )
+        )
+        return
 
     if args.command == "profile":
         qc_record: dict[str, object] | None = None
@@ -78,6 +138,7 @@ def main() -> None:
             args.liver_mask,
             target_space=args.target_space,
             qc_record=qc_record,
+            spatial=args.spatial,
         )
         targets = dict(reference.features)
         for specification in args.target:
