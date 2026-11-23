@@ -695,6 +695,55 @@ def test_loaded_model_draws_match_one_shot_draws_and_rng(
         model.run(**draw("closed"))
 
 
+@pytest.mark.parametrize(
+    "inference_mode,sampler", [("source", "ddim"), ("conditioned", "dpmpp_2m")]
+)
+def test_mask_draws_match_one_shot_masks(
+    inference_mode: str,
+    sampler: str,
+    scan: tuple[Path, Path],
+    tiny_weights: Path,
+    conditioned_weights: Path,
+    tiny_networks: None,
+    tmp_path: Path,
+) -> None:
+    """Masks drawn for several seeds equal the masks of one-shot runs with those seeds."""
+    weights = tiny_weights if inference_mode == "source" else conditioned_weights
+
+    def once(name: str, seed: int, **box: object) -> medmlx.RunResult:
+        return run(
+            **_arguments(
+                scan,
+                tmp_path / name,
+                weights,
+                seed=seed,
+                inference_mode=inference_mode,
+                sampler=sampler,
+                **box,
+            )
+        )
+
+    first = once("first", 11)
+    center = first["details"]["generation_spec"]["bbox_center_voxel"]
+    second = once("second", 19, bbox_center_voxel=center)
+    masks = medmlx.draw_lesion_masks(
+        image_path=scan[0],
+        organ_mask_path=scan[1],
+        weights_path=weights,
+        organ="liver",
+        lesion_type="tumor",
+        bbox_size_mm=list(BBOX_MM),
+        bbox_center_voxel=center,
+        seeds=[11, 19, 11],
+        diffusion_steps=10,
+        sampler=sampler,
+        inference_mode=inference_mode,
+    )
+    for mask, result in zip(masks, (first, second, first), strict=True):
+        written = np.asanyarray(nib.load(result["outputs"]["mask"]).dataobj)
+        np.testing.assert_array_equal(mask, written == 1)
+
+
 @pytest.mark.parametrize("decoder_mode", ["reference", "scaled_fp16"])
 def test_dpm_solver_runs_both_conditioned_stages_with_exact_call_counts(
     scan: tuple[Path, Path],

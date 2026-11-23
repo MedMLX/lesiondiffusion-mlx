@@ -730,6 +730,145 @@ def load_model(*, weights_path: _PathArg | None = None) -> LesionDiffusionModel:
     return LesionDiffusionModel(weights_path=weights_path)
 
 
+def draw_lesion_masks(
+    *,
+    image_path: _PathArg,
+    organ_mask_path: _PathArg,
+    anatomy_mask_path: _PathArg | None = None,
+    weights_path: _PathArg | None = None,
+    organ: str,
+    lesion_type: str,
+    bbox_size_mm: Sequence[float],
+    bbox_center_voxel: Sequence[int],
+    seeds: Sequence[int],
+    shape: str = "irregular",
+    enhancement: str = "non-contrast CT",
+    surface: str = "ill-defined margin",
+    adjacent_relationship: str = "no close relationship with surrounding organs",
+    specific_features: str = "",
+    diffusion_steps: int = DEFAULT_DIFFUSION_STEPS,
+    sampler: str = "ddim",
+    inference_mode: str = DEFAULT_INFERENCE_MODE,
+) -> list[BoolArray]:
+    """Draw LMNet lesion masks for several seeds in one box, without inpainting.
+
+    LMNet and its text conditioning load once and each seed draws one mask, so a
+    mask costs its sampling steps only: no CT is encoded, inpainted, decoded or
+    written. Each mask equals the ``mask`` output of :func:`run` called with that
+    seed, the same box center and otherwise the same arguments. Pass a chosen mask
+    to :func:`run` as ``lesion_mask_path`` to inpaint it.
+
+    LMNet's text has no density, placement or size terms, so those arguments of
+    :func:`run` are absent. The box center is required: a box placed from the seed
+    would differ between draws.
+
+    Args:
+        image_path, organ_mask_path, anatomy_mask_path, weights_path, organ,
+            lesion_type, bbox_size_mm, shape, enhancement, surface,
+            adjacent_relationship, specific_features, sampler, inference_mode: As in
+            :func:`run`.
+        bbox_center_voxel: Box center (I, J, K) on the standardized grid.
+        seeds: One seed per mask, each from 0 to 2**32 - 1. Each reseeds MLX's RNG
+            before its draw.
+        diffusion_steps: LMNet step count, under the schedule rules of :func:`run`.
+
+    Returns:
+        One boolean array per seed, in seed order, on the standardized RAS 1 mm grid
+        that ``run`` writes its outputs on. ``True`` marks the lesion.
+
+    Raises:
+        InvalidInputError: For invalid options or inputs, as :func:`run`, a missing
+            box center or an empty seed list.
+        AssetNotReadyError: If the weights directory is missing or not current.
+        ModelExecutionError: If LMNet produces non-finite values or an empty lesion
+            mask, or MLX raises a runtime error during execution.
+    """
+    if cast(object, bbox_center_voxel) is None:
+        raise InvalidInputError("LesionDiffusion mask draws need bbox_center_voxel")
+    if isinstance(seeds, str | bytes) or not isinstance(cast(object, seeds), Sequence) or not seeds:
+        raise InvalidInputError("LesionDiffusion seeds must be a nonempty sequence")
+    # Density and placement validate here but do not reach LMNet (see ``_lmnet_attributes``).
+    draws = [
+        _parse_options(
+            organ=organ,
+            lesion_type=lesion_type,
+            bbox_size_mm=bbox_size_mm,
+            placement="inside_parenchyma",
+            shape=shape,
+            density="hypodense lesion",
+            density_variation="heterogeneous",
+            enhancement=enhancement,
+            surface=surface,
+            adjacent_relationship=adjacent_relationship,
+            specific_features=specific_features,
+            bbox_center_voxel=bbox_center_voxel,
+            diffusion_steps=diffusion_steps,
+            sampler=sampler,
+            seed=seed,
+            inference_mode=inference_mode,
+        )
+        for seed in seeds
+    ]
+    options = draws[0]
+    source, supplied_mask = _scan_paths(image_path, organ_mask_path)
+    anatomy_path = _optional_input_path(anatomy_mask_path, "anatomy mask", {})
+    folder = weights_dir(MODEL_ID) if weights_path is None else weights_path
+    directory = require_weights(folder, inference_mode=options.inference_mode)
+    try:
+        geometry = prepare_geometry(
+            source=source, supplied_mask=supplied_mask, supplied_anatomy=anatomy_path,
+            options=options,
+        )
+        organ_id, _ = source_organ_label(options.organ)
+        report = _structured_report(
+            reference=geometry.reference,
+            organ_mask=geometry.organ_mask,
+            organ_label=organ_id,
+            center=geometry.center,
+            bbox_size=geometry.bbox_size_voxel,
+            options=options,
+        )
+        attributes = cast(dict[str, object], cast(list[object], report[str(organ_id)])[2])
+        mx = cast("Mlx", import_mlx())
+        organ_source = ras_to_source(geometry.organ_mask).astype(bool)
+        anatomy = (
+            ras_to_source(geometry.anatomy_mask)
+            if geometry.anatomy_mask is not None
+            else organ_source.astype(np.uint8) * organ_id
+        )
+        draw, _ = _lmnet_sampler(
+            organ_source,
+            ras_to_source(geometry.bbox_mask) == 2,
+            options,
+            _lmnet_attributes(attributes, options),
+            directory,
+            directory / TOKENIZER_FILE,
+            mx,
+            anatomy=anatomy,
+        )
+        masks: list[BoolArray] = []
+        try:
+            for item in draws:
+                mx.random.seed(item.seed)
+                lesion, _ = draw()
+                mask = source_to_ras(lesion)[_input_grid(geometry.output_reference)].astype(bool)
+                if not np.any(mask):
+                    raise ModelExecutionError(
+                        "LesionDiffusion mask output does not contain lesion label 2"
+                    )
+                masks.append(mask)
+        finally:
+            del draw
+            gc.collect()
+            mx.clear_cache()
+    except MedmlxError:
+        raise
+    except RuntimeError as exc:
+        # MLX and Metal failures surface as RuntimeError; report them as execution errors.
+        raise ModelExecutionError(f"LesionDiffusion failed during execution: {exc}") from exc
+    return masks
+
+
 def _generate(
     prepared: _Preparation | None,
     options: LesionDiffusionOptions,
@@ -797,13 +936,8 @@ def _run_paths(
     """Resolve input and output paths and prevent output collisions."""
     if not isinstance(cast(object, overwrite), bool):
         raise InvalidInputError("overwrite must be a boolean")
-    source = Path(image_path).expanduser().resolve()
-    supplied_mask = Path(organ_mask_path).expanduser().resolve()
+    source, supplied_mask = _scan_paths(image_path, organ_mask_path)
     output = Path(output_dir).expanduser().resolve()
-    if not source.is_file():
-        raise InvalidInputError(f"Missing input CT NIfTI: {source}")
-    if not supplied_mask.is_file():
-        raise InvalidInputError(f"Missing organ mask NIfTI: {supplied_mask}")
     outputs = output_paths(output, output_region)
     if source in outputs.values():
         raise InvalidInputError("LesionDiffusion output files must not overwrite the input CT")
@@ -820,6 +954,17 @@ def _run_paths(
                 f"{existing[0]} already exists; pass overwrite=true to replace outputs"
             )
     return source, supplied_mask, outputs
+
+
+def _scan_paths(image_path: _PathArg, organ_mask_path: _PathArg) -> tuple[Path, Path]:
+    """Resolve the CT and organ mask paths and require both files."""
+    source = Path(image_path).expanduser().resolve()
+    supplied_mask = Path(organ_mask_path).expanduser().resolve()
+    if not source.is_file():
+        raise InvalidInputError(f"Missing input CT NIfTI: {source}")
+    if not supplied_mask.is_file():
+        raise InvalidInputError(f"Missing organ mask NIfTI: {supplied_mask}")
+    return source, supplied_mask
 
 
 def _optional_input_path(
@@ -1194,7 +1339,7 @@ def _lmnet_attributes(
     return lm_attributes
 
 
-def _run_lmnet(
+def _lmnet_sampler(
     organ: BoolArray,
     bbox: BoolArray,
     options: LesionDiffusionOptions,
@@ -1204,10 +1349,19 @@ def _run_lmnet(
     mx: Mlx,
     *,
     anatomy: HostArray,
-) -> tuple[BoolArray, dict[str, object]]:
-    """Generate and validate a lesion mask within the selected crop."""
+) -> tuple[Callable[[], tuple[BoolArray, int]], int]:
+    """Load LMNet for one box and return its mask draw and actual step count.
+
+    Each call of the draw samples from the current MLX random stream, applies the
+    volume QC and returns ``(lesion, attempts)``, with the lesion in source order on
+    the full grid. The draw owns the network, its text condition and the compiled
+    sampler; dropping it releases them.
+
+    Raises:
+        ModelExecutionError: From the draw, if LMNet produces non-finite samples or
+            an empty lesion.
+    """
     crop = source_crop(bbox, LMNET_CROP)
-    lm_started = time.perf_counter()
     optimized = options.inference_mode == "conditioned"
     lmnet = LdmUnet(
         load_stage(directory, "lmnet", mx, dtype=mx.float32),
@@ -1233,38 +1387,70 @@ def _run_lmnet(
     )
     sampler_class = DdimSampler if options.sampler == "ddim" else Dpmpp2mSampler
     sampler = sampler_class(lmnet.weights["alphas_cumprod"], mx, diffusion_steps)
-    actual_steps = len(sampler.timesteps)
     sample = (
         sampler.prepare(lmnet.prepare_denoiser(condition), conditioning)
         if optimized
         else partial(sampler, lmnet.__call__, condition, conditioning)
     )
+
+    def draw() -> tuple[BoolArray, int]:
+        lesion = np.zeros(bbox.shape, dtype=bool)
+        attempts = 0
+        # Volume QC: resample once if the selected component is too small (at most 400
+        # voxels, 50 for stones); the second attempt is kept either way.
+        for attempt in range(1, 3):
+            attempts = attempt
+            samples = sample()
+            mx.eval(samples)
+            if not bool(mx.all(mx.isfinite(samples)).item()):
+                raise ModelExecutionError("Native LMNet produced non-finite samples")
+            component = select_lesion_component(
+                cast(FloatArray, np.array(samples))[0, 0], bbox[crop]
+            )
+            lesion[crop] = component
+            if int(np.sum(component)) > (50 if "stone" in options.lesion_type else 400):
+                break
+        if not np.any(lesion):
+            raise ModelExecutionError(
+                "LesionDiffusion LMNet QC rejected this seed: mask has no lesion label 2"
+            )
+        return lesion, attempts
+
+    return draw, len(sampler.timesteps)
+
+
+def _run_lmnet(
+    organ: BoolArray,
+    bbox: BoolArray,
+    options: LesionDiffusionOptions,
+    lm_attributes: Mapping[str, object],
+    directory: Path,
+    tokenizer_path: Path,
+    mx: Mlx,
+    *,
+    anatomy: HostArray,
+) -> tuple[BoolArray, dict[str, object]]:
+    """Generate and validate a lesion mask within the selected crop."""
+    lm_started = time.perf_counter()
+    optimized = options.inference_mode == "conditioned"
+    diffusion_steps = (
+        options.diffusion_steps
+        if options.lmnet_diffusion_steps is None
+        else options.lmnet_diffusion_steps
+    )
+    draw, actual_steps = _lmnet_sampler(
+        organ, bbox, options, lm_attributes, directory, tokenizer_path, mx, anatomy=anatomy
+    )
     load_elapsed = time.perf_counter() - lm_started
-    lesion = np.zeros(bbox.shape, dtype=bool)
-    attempts = 0
-    samples: Array | None = None
-    # Volume QC: resample once if the selected component is too small (at most 400
-    # voxels, 50 for stones); the second attempt is kept either way.
     sampling_started = time.perf_counter()
-    for attempt in range(1, 3):
-        attempts = attempt
-        samples = sample()
-        mx.eval(samples)
-        if not bool(mx.all(mx.isfinite(samples)).item()):
-            raise ModelExecutionError("Native LMNet produced non-finite samples")
-        component = select_lesion_component(cast(FloatArray, np.array(samples))[0, 0], bbox[crop])
-        lesion[crop] = component
-        if int(np.sum(component)) > (50 if "stone" in options.lesion_type else 400):
-            break
-    # Release LMNet before LINet and the VQ autoencoder load, to bound peak memory.
-    sampling_elapsed = time.perf_counter() - sampling_started
-    del lmnet, sample, condition, conditioning, sampler, samples
-    gc.collect()
-    mx.clear_cache()
-    if not np.any(lesion):
-        raise ModelExecutionError(
-            "LesionDiffusion LMNet QC rejected this seed: mask has no lesion label 2"
-        )
+    try:
+        lesion, attempts = draw()
+        sampling_elapsed = time.perf_counter() - sampling_started
+    finally:
+        # Release LMNet before LINet and the VQ autoencoder load, to bound peak memory.
+        del draw
+        gc.collect()
+        mx.clear_cache()
     lm_stage: dict[str, object] = {
         "status": "completed",
         "device": str(mx.default_device()),
