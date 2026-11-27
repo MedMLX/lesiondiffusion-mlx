@@ -1,4 +1,4 @@
-"""Used MLX 0.32.4 neural-network APIs, checked against installed Python source."""
+"""Used MLX 0.32.5 neural-network APIs, checked against installed Python source."""
 
 from collections.abc import Callable
 

@@ -38,7 +38,7 @@ authors = [
 ]
 dependencies = [
   "medmlx-core[nifti]>=0.3.2,<0.4",
-  "mlx==0.32.4; platform_system == 'Darwin' and platform_machine == 'arm64'",
+  "mlx==0.32.5; platform_system == 'Darwin' and platform_machine == 'arm64'",
   "nibabel>=5.3,<6",
   "numpy>=2.2,<3",
   "safetensors>=0.6,<1",

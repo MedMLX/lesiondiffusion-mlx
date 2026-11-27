@@ -11,7 +11,7 @@ requires-python = ">=3.13,<3.14"
 dependencies = [
   "lesiondiffusion-mlx==0.4.0",
   "mlxradiomics==1.2.0",
-  "mlx==0.32.4; platform_system == 'Darwin' and platform_machine == 'arm64'",
+  "mlx==0.32.5; platform_system == 'Darwin' and platform_machine == 'arm64'",
   "numpy==2.3.5",
   "scipy==1.18.1",
   "nibabel==5.4.2",
